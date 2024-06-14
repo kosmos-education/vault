@@ -24,6 +24,8 @@ replace github.com/hashicorp/vault/api/auth/userpass => ./api/auth/userpass
 
 replace github.com/hashicorp/vault/sdk => ./sdk
 
+replace github.com/hashicorp/vault-plugin-secrets-kv => ./plugins/vault-plugin-secrets-kv
+
 require (
 	cloud.google.com/go/cloudsqlconn v1.4.3
 	cloud.google.com/go/monitoring v1.19.0
