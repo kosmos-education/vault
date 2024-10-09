@@ -96,7 +96,7 @@ decides to trigger the flag. More information can be found in the
 
 ### Auto-rolled billing start date
 
-As of 1.16.7 and later, the billing start date (license start date if not configured) automatically rolls over to the latest billing year at the end of the last cycle. 
+As of 1.16.7 and later, the billing start date (license start date if not configured) automatically rolls over to the latest billing year at the end of the last cycle.
 
 @include 'auto-roll-billing-start.mdx'
 
@@ -144,6 +144,8 @@ kubectl exec -ti <NAME> -- wget https://github.com/moparisthebest/static-curl/re
 
 ## Known issues and workarounds
 
+@include 'known-issues/1_17_audit-log-hmac.mdx'
+
 @include 'known-issues/1_16-jwt_auth_bound_audiences.mdx'
 
 @include 'known-issues/1_16-jwt_auth_config.mdx'
@@ -164,9 +166,9 @@ kubectl exec -ti <NAME> -- wget https://github.com/moparisthebest/static-curl/re
 
 @include 'known-issues/1_13-reload-census-panic-standby.mdx'
 
-@include 'known-issues/1_16_secrets-sync-chroot-activation.mdx'
-
 @include 'known-issues/autopilot-upgrade-upgrade-version.mdx'
+
+@include 'known-issues/1_16_secrets-sync-chroot-activation.mdx'
 
 @include 'known-issues/config_listener_proxy_protocol_behavior_issue.mdx'
 

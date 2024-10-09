@@ -83,7 +83,7 @@ incorrectly. For additional details, refer to the
 
 ### Auto-rolled billing start date
 
-As of 1.17.3 and later, the billing start date (license start date if not configured) rolls over to the latest billing year at the end of the last cycle. 
+As of 1.17.3 and later, the billing start date (license start date if not configured) rolls over to the latest billing year at the end of the last cycle.
 
 @include 'auto-roll-billing-start.mdx'
 
@@ -130,6 +130,8 @@ kubectl exec -ti <NAME> -- wget https://github.com/moparisthebest/static-curl/re
 **NOTE:** When using this option you'll want to verify that the static binary comes from a trusted source.
 
 ## Known issues and workarounds
+
+@include 'known-issues/1_17_audit-log-hmac.mdx'
 
 @include 'known-issues/ocsp-redirect.mdx'
 

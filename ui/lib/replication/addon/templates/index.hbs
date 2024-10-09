@@ -8,7 +8,7 @@
     {{#if (eq this.model.mode "unsupported")}}
       <PageHeader as |p|>
         <p.levelLeft>
-          <h1 class="title is-3 has-text-grey" data-test-replication-title>
+          <h1 class="title is-3 has-text-grey" data-test-replication-title="Replication unsupported">
             Replication unsupported
           </h1>
         </p.levelLeft>
@@ -19,7 +19,7 @@
     {{else if this.model.allReplicationDisabled}}
       <PageHeader as |p|>
         <p.levelLeft>
-          <h1 class="title is-3" data-test-replication-title>
+          <h1 class="title is-3" data-test-replication-title="Enable Replication">
             Enable Replication
           </h1>
         </p.levelLeft>
@@ -91,8 +91,8 @@
       </div>
       <EnableReplicationForm
         @replicationMode={{this.modeSelection}}
-        @canEnablePrimary={{this.model.canEnablePrimary}}
-        @canEnableSecondary={{this.model.canEnableSecondary}}
+        @canEnablePrimary={{this.canEnablePrimary}}
+        @canEnableSecondary={{this.canEnableSecondary}}
         @performanceReplicationDisabled={{this.model.performance.replicationDisabled}}
         @performanceMode={{if this.model.performance.replicationDisabled "disabled" this.model.performance.modeForUrl}}
         @onSuccess={{this.onEnableSuccess}}

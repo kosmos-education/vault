@@ -133,6 +133,7 @@ func NewSystemBackend(core *Core, logger log.Logger, config *logical.BackendConf
 				"storage/raft/snapshot-auto/config/*",
 				"leases",
 				"internal/inspect/*",
+				"internal/counters/activity/export",
 				// sys/seal and sys/step-down actually have their sudo requirement enforced through hardcoding
 				// PolicyCheckOpts.RootPrivsRequired in dedicated calls to Core.performPolicyChecks, but we still need
 				// to declare them here so that the generated OpenAPI spec gets their sudo status correct.
@@ -2225,12 +2226,12 @@ func (b *SystemBackend) handleTuneWriteCommon(ctx context.Context, path string, 
 		return nil, logical.ErrReadOnly
 	}
 
-	var lock *locking.DeadlockRWMutex
+	var lock locking.RWMutex
 	switch {
 	case strings.HasPrefix(path, credentialRoutePrefix):
-		lock = &b.Core.authLock
+		lock = b.Core.authLock
 	default:
-		lock = &b.Core.mountsLock
+		lock = b.Core.mountsLock
 	}
 
 	lock.Lock()
@@ -6120,7 +6121,7 @@ func sanitizePath(path string) string {
 		path += "/"
 	}
 
-	if strings.HasPrefix(path, "/") {
+	for strings.HasPrefix(path, "/") {
 		path = path[1:]
 	}
 

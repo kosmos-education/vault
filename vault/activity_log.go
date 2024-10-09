@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,11 +23,13 @@ import (
 	"github.com/axiomhq/hyperloglog"
 	"github.com/golang/protobuf/proto"
 	log "github.com/hashicorp/go-hclog"
+	lru "github.com/hashicorp/golang-lru"
 	"github.com/hashicorp/vault/helper/metricsutil"
 	"github.com/hashicorp/vault/helper/namespace"
 	"github.com/hashicorp/vault/helper/timeutil"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/hashicorp/vault/vault/activity"
+	"github.com/mitchellh/mapstructure"
 	"go.uber.org/atomic"
 )
 
@@ -96,9 +99,25 @@ const (
 	// activityLogMaximumRetentionMonths sets the default maximum retention_months
 	// to enforce when reporting is enabled.
 	activityLogMaximumRetentionMonths = 60
+
+	// ActivityExportInvalidFormatPrefix is used to check validation errors for the
+	// activity log export API handler
+	ActivityExportInvalidFormatPrefix = "invalid format"
+
+	// exportCSVFlatteningInitIndex is used within the activity export API when the "csv"
+	// format is requested. Map and slice values will be flattened and accumulated by the
+	// CSV encoder. Indexes will be generated to ensure that values are slotted into the
+	// correct column. This initial value is used prior to finalizing the CSV header.
+	exportCSVFlatteningInitIndex = -1
 )
 
-var ActivityClientTypes = []string{nonEntityTokenActivityType, entityActivityType, secretSyncActivityType, ACMEActivityType}
+var (
+	ActivityClientTypes = []string{nonEntityTokenActivityType, entityActivityType, secretSyncActivityType, ACMEActivityType}
+
+	// ErrActivityExportInProgress is used to check validation errors for the
+	// activity log export API handler
+	ErrActivityExportInProgress = errors.New("existing export in progress")
+)
 
 type segmentInfo struct {
 	startTimestamp       int64
@@ -143,7 +162,8 @@ type ActivityLog struct {
 
 	// nodeID is the ID to use for all fragments that
 	// are generated.
-	// TODO: use secondary ID when available?
+	// This uses the primary ID as of right now, but
+	// could be adapted to use a secondary in the future.
 	nodeID string
 
 	// current log fragment (may be nil)
@@ -187,14 +207,6 @@ type ActivityLog struct {
 
 	inprocessExport *atomic.Bool
 
-	// CensusReportDone is a channel used to signal tests upon successful calls
-	// to (CensusReporter).Write() in CensusReport.
-	CensusReportDone chan bool
-
-	// CensusReportInterval is the testing configuration for time between
-	// Write() calls initiated in CensusReport.
-	CensusReportInterval time.Duration
-
 	// clock is used to support manipulating time in unit and integration tests
 	clock timeutil.Clock
 	// precomputedQueryWritten receives an element whenever a precomputed query
@@ -214,9 +226,6 @@ type ActivityLogCoreConfig struct {
 	// Do not start timers to send or persist fragments.
 	DisableTimers bool
 
-	// CensusReportInterval is the testing configuration for time
-	CensusReportInterval time.Duration
-
 	// MinimumRetentionMonths defines the minimum value for retention
 	MinimumRetentionMonths int
 
@@ -225,6 +234,62 @@ type ActivityLogCoreConfig struct {
 	Clock timeutil.Clock
 
 	DisableInvalidation bool
+}
+
+// ActivityLogExportRecord is the output structure for activity export
+// API records. The fields below are all associated with the token used to
+// perform the logged activity. The omitempty JSON tag is not used to ensure
+// that the fields are consistent between CSV and JSON output.
+type ActivityLogExportRecord struct {
+	// EntityName is the name of the entity
+	EntityName string `json:"entity_name" mapstructure:"entity_name"`
+
+	// EntityAliasName is the entity alias name provided by the auth backend upon login
+	EntityAliasName string `json:"entity_alias_name" mapstructure:"entity_alias_name"`
+
+	// LocalEntityAlias indicates if the entity alias only belongs to the cluster where it was created.
+	LocalEntityAlias bool `json:"local_entity_alias" mapstructure:"local_entity_alias"`
+
+	// ClientID is the unique identifier assigned to the entity that performed the activity
+	ClientID string `json:"client_id" mapstructure:"client_id"`
+
+	// ClientType identifies the source of the entity record (entity, non-entity, acme, etc.)
+	ClientType string `json:"client_type" mapstructure:"client_type"`
+
+	// NamespaceID is the identifier of the namespace in which the associated auth backend resides
+	NamespaceID string `json:"namespace_id" mapstructure:"namespace_id"`
+
+	// NamespacePath is the path of the namespace in which the associated auth backend resides
+	NamespacePath string `json:"namespace_path" mapstructure:"namespace_path"`
+
+	// MountAccessor is the auth mount accessor associated with the token used
+	MountAccessor string `json:"mount_accessor" mapstructure:"mount_accessor"`
+
+	// MountType is the type of the auth mount associated with the token used
+	MountType string `json:"mount_type" mapstructure:"mount_type"`
+
+	// MountPath is the path of the auth mount associated with the token used
+	MountPath string `json:"mount_path" mapstructure:"mount_path"`
+
+	// Timestamp denotes the time at which the activity occurred formatted using RFC3339
+	Timestamp string `json:"timestamp" mapstructure:"timestamp"`
+
+	// Policies are the list of policy names attached to the token used
+	Policies []string `json:"policies" mapstructure:"policies"`
+
+	// EntityMetadata represents explicit metadata set by clients. Multiple entities can have the
+	// same metadata which enables virtual groupings of entities.
+	EntityMetadata map[string]string `json:"entity_metadata" mapstructure:"entity_metadata"`
+
+	// EntityAliasMetadata represents the metadata associated with the identity alias. Multiple aliases can
+	// have the same custom metadata which enables virtual grouping of aliases.
+	EntityAliasMetadata map[string]string `json:"entity_alias_metadata" mapstructure:"entity_alias_metadata"`
+
+	// EntityAliasCustomMetadata represents the custom metadata associated with the identity alias
+	EntityAliasCustomMetadata map[string]string `json:"entity_alias_custom_metadata" mapstructure:"entity_alias_custom_metadata"`
+
+	// EntityGroupIDs provides a list of all of the identity group IDs in which an entity belongs
+	EntityGroupIDs []string `json:"entity_group_ids" mapstructure:"entity_group_ids"`
 }
 
 // NewActivityLog creates an activity log.
@@ -249,7 +314,6 @@ func NewActivityLog(core *Core, logger log.Logger, view *BarrierView, metrics me
 		sendCh:                    make(chan struct{}, 1), // buffered so it can be triggered by fragment size
 		doneCh:                    make(chan struct{}, 1),
 		partialMonthClientTracker: make(map[string]*activity.EntityRecord),
-		CensusReportInterval:      time.Hour * 1,
 		clock:                     clock,
 		currentSegment: segmentInfo{
 			startTimestamp: 0,
@@ -998,7 +1062,7 @@ func (a *ActivityLog) refreshFromStoredLog(ctx context.Context, wg *sync.WaitGro
 	return nil
 }
 
-// This version is used during construction
+// SetConfigInit is used during construction
 func (a *ActivityLog) SetConfigInit(config activityConfig) {
 	switch config.Enabled {
 	case "enable":
@@ -1020,13 +1084,9 @@ func (a *ActivityLog) SetConfigInit(config activityConfig) {
 	if a.configOverrides.MinimumRetentionMonths > 0 {
 		a.retentionMonths = a.configOverrides.MinimumRetentionMonths
 	}
-
-	if a.configOverrides.CensusReportInterval > 0 {
-		a.CensusReportInterval = a.configOverrides.CensusReportInterval
-	}
 }
 
-// This version reacts to user changes
+// SetConfig reacts to user changes
 func (a *ActivityLog) SetConfig(ctx context.Context, config activityConfig) {
 	a.l.Lock()
 	defer a.l.Unlock()
@@ -1685,9 +1745,7 @@ func (a *ActivityLog) receivedFragment(fragment *activity.LogFragment) {
 }
 
 type ResponseCounts struct {
-	DistinctEntities int `json:"distinct_entities" mapstructure:"distinct_entities"`
 	EntityClients    int `json:"entity_clients" mapstructure:"entity_clients"`
-	NonEntityTokens  int `json:"non_entity_tokens" mapstructure:"non_entity_tokens"`
 	NonEntityClients int `json:"non_entity_clients" mapstructure:"non_entity_clients"`
 	Clients          int `json:"clients"`
 	SecretSyncs      int `json:"secret_syncs" mapstructure:"secret_syncs"`
@@ -1701,9 +1759,7 @@ func (r *ResponseCounts) Add(newRecord *ResponseCounts) {
 	}
 	r.EntityClients += newRecord.EntityClients
 	r.Clients += newRecord.Clients
-	r.DistinctEntities += newRecord.DistinctEntities
 	r.NonEntityClients += newRecord.NonEntityClients
-	r.NonEntityTokens += newRecord.NonEntityTokens
 	r.ACMEClients += newRecord.ACMEClients
 	r.SecretSyncs += newRecord.SecretSyncs
 }
@@ -1923,6 +1979,7 @@ func (a *ActivityLog) modifyResponseMonths(months []*ResponseMonth, start time.T
 type activityConfig struct {
 	// DefaultReportMonths are the default number of months that are returned on
 	// a report. The zero value uses the system default of 12.
+	// Deprecated: This field was removed in favor of using different default startTime and endTime values
 	DefaultReportMonths int `json:"default_report_months"`
 
 	// RetentionMonths defines the number of months we want to retain data. The
@@ -1931,8 +1988,6 @@ type activityConfig struct {
 
 	// Enabled is one of enable, disable, default.
 	Enabled string `json:"enabled"`
-
-	CensusReportInterval time.Duration `json:"census_report_interval"`
 }
 
 func defaultActivityConfig() activityConfig {
@@ -2730,7 +2785,7 @@ func (a *ActivityLog) calculateByNamespaceResponseForQuery(ctx context.Context, 
 			for _, mountRecord := range nsRecord.Mounts {
 				mountResponse = append(mountResponse, &ResponseMount{
 					MountPath: mountRecord.MountPath,
-					Counts:    a.countsRecordToCountsResponse(mountRecord.Counts, true),
+					Counts:    a.countsRecordToCountsResponse(mountRecord.Counts),
 				})
 			}
 			// Sort the mounts in descending order of usage
@@ -2740,7 +2795,7 @@ func (a *ActivityLog) calculateByNamespaceResponseForQuery(ctx context.Context, 
 
 			var displayPath string
 			if ns == nil {
-				displayPath = fmt.Sprintf("deleted namespace %q", nsRecord.NamespaceID)
+				displayPath = fmt.Sprintf(DeletedNamespaceFmt, nsRecord.NamespaceID)
 			} else {
 				displayPath = ns.Path
 			}
@@ -2815,20 +2870,20 @@ func (a *ActivityLog) prepareNamespaceResponse(ctx context.Context, nsRecords []
 
 				mountResponse = append(mountResponse, &ResponseMount{
 					MountPath: mountRecord.MountPath,
-					Counts:    a.countsRecordToCountsResponse(mountRecord.Counts, false),
+					Counts:    a.countsRecordToCountsResponse(mountRecord.Counts),
 				})
 			}
 
 			var displayPath string
 			if ns == nil {
-				displayPath = fmt.Sprintf("deleted namespace %q", nsRecord.NamespaceID)
+				displayPath = fmt.Sprintf(DeletedNamespaceFmt, nsRecord.NamespaceID)
 			} else {
 				displayPath = ns.Path
 			}
 			nsResponse := &ResponseNamespace{
 				NamespaceID:   nsRecord.NamespaceID,
 				NamespacePath: displayPath,
-				Counts:        *a.countsRecordToCountsResponse(nsRecord.Counts, false),
+				Counts:        *a.countsRecordToCountsResponse(nsRecord.Counts),
 				Mounts:        mountResponse,
 			}
 			nsResponses = append(nsResponses, nsResponse)
@@ -2872,9 +2927,7 @@ func (a *ActivityLog) partialMonthClientCount(ctx context.Context) (map[string]i
 	// Now populate the response based on breakdowns.
 	responseData := make(map[string]interface{})
 	responseData["by_namespace"] = byNamespaceResponse
-	responseData["distinct_entities"] = totalCounts.EntityClients
 	responseData["entity_clients"] = totalCounts.EntityClients
-	responseData["non_entity_tokens"] = totalCounts.NonEntityClients
 	responseData["non_entity_clients"] = totalCounts.NonEntityClients
 	responseData["clients"] = totalCounts.Clients
 	responseData["secret_syncs"] = totalCounts.SecretSyncs
@@ -2911,10 +2964,9 @@ func (a *ActivityLog) partialMonthClientCount(ctx context.Context) (map[string]i
 }
 
 func (a *ActivityLog) writeExport(ctx context.Context, rw http.ResponseWriter, format string, startTime, endTime time.Time) error {
-	// For capacity reasons only allow a single in-process export at a time.
-	// TODO do we really need to do this?
+	// Only allow a single in-process export at a time as they can be resource-intensive
 	if !a.inprocessExport.CAS(false, true) {
-		return fmt.Errorf("existing export in progress")
+		return ErrActivityExportInProgress
 	}
 	defer a.inprocessExport.Store(false)
 
@@ -2941,7 +2993,7 @@ func (a *ActivityLog) writeExport(ctx context.Context, rw http.ResponseWriter, f
 	}
 	if len(filteredList) == 0 {
 		a.logger.Info("no data to export", "start_time", startTime, "end_time", endTime)
-		return fmt.Errorf("no data to export in provided time range")
+		return nil
 	}
 
 	actualStartTime := filteredList[len(filteredList)-1]
@@ -2950,14 +3002,16 @@ func (a *ActivityLog) writeExport(ctx context.Context, rw http.ResponseWriter, f
 	// Add headers here because we start to immediately write in the csv encoder
 	// constructor.
 	rw.Header().Add("Content-Disposition", fmt.Sprintf("attachment; filename=\"activity_export_%d_to_%d.%s\"", actualStartTime.Unix(), endTime.Unix(), format))
-	rw.Header().Add("Content-Type", fmt.Sprintf("application/%s", format))
 
 	var encoder encoder
 	switch format {
 	case "json":
+		rw.Header().Add("Content-Type", fmt.Sprintf("application/json"))
 		encoder = newJSONEncoder(rw)
 	case "csv":
 		var err error
+		rw.Header().Add("Content-Type", fmt.Sprintf("text/csv"))
+
 		encoder, err = newCSVEncoder(rw)
 		if err != nil {
 			return fmt.Errorf("failed to create csv encoder: %w", err)
@@ -2968,31 +3022,259 @@ func (a *ActivityLog) writeExport(ctx context.Context, rw http.ResponseWriter, f
 
 	a.logger.Info("starting activity log export", "start_time", startTime, "end_time", endTime, "format", format)
 
-	dedupedIds := make(map[string]struct{})
+	dedupIDs := make(map[string]struct{})
+	reqNS, err := namespace.FromContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	// an LRU cache is used to optimistically prevent frequent
+	// lookup of common identity backends
+	identityBackendCache, err := lru.New2Q(10)
+	if err != nil {
+		return err
+	}
 
 	walkEntities := func(l *activity.EntityActivityLog, startTime time.Time, hll *hyperloglog.Sketch) error {
 		for _, e := range l.Clients {
-			if _, ok := dedupedIds[e.ClientID]; ok {
+			if _, ok := dedupIDs[e.ClientID]; ok {
 				continue
 			}
 
-			dedupedIds[e.ClientID] = struct{}{}
-			err := encoder.Encode(e)
+			dedupIDs[e.ClientID] = struct{}{}
+
+			ns, err := NamespaceByID(ctx, e.NamespaceID, a.core)
 			if err != nil {
 				return err
+			}
+			var nsDisplayPath string
+			if ns == nil {
+				nsDisplayPath = fmt.Sprintf(DeletedNamespaceFmt, e.NamespaceID)
+			} else {
+				nsDisplayPath = ns.Path
+			}
+
+			if !a.includeInResponse(reqNS, ns) {
+				continue
+			}
+
+			ts := time.Unix(e.Timestamp, 0)
+
+			record := &ActivityLogExportRecord{
+				ClientID:      e.ClientID,
+				ClientType:    e.ClientType,
+				NamespaceID:   e.NamespaceID,
+				NamespacePath: nsDisplayPath,
+				Timestamp:     ts.UTC().Format(time.RFC3339),
+				MountAccessor: e.MountAccessor,
+
+				// Default following to empty versus nil, will be overwritten if necessary
+				Policies:                  []string{},
+				EntityMetadata:            map[string]string{},
+				EntityAliasMetadata:       map[string]string{},
+				EntityAliasCustomMetadata: map[string]string{},
+				EntityGroupIDs:            []string{},
+			}
+
+			if e.MountAccessor != "" {
+				cacheKey := e.NamespaceID + mountPathIdentity
+
+				var identityBackend logical.Backend
+
+				val, ok := identityBackendCache.Get(cacheKey)
+				if !ok {
+					identityBackend = a.core.router.MatchingBackend(namespace.ContextWithNamespace(ctx, ns), mountPathIdentity)
+
+					if identityBackend != nil {
+						identityBackendCache.Add(cacheKey, identityBackend)
+					}
+				} else {
+					identityBackend = val.(logical.Backend)
+				}
+
+				if identityBackend != nil {
+					req := &logical.Request{
+						Path:      "lookup/entity",
+						Storage:   a.core.systemBarrierView,
+						Operation: logical.UpdateOperation,
+						Data: map[string]interface{}{
+							"id": e.ClientID,
+						},
+					}
+
+					entityResp, err := identityBackend.HandleRequest(namespace.ContextWithNamespace(ctx, ns), req)
+					if err != nil {
+						return fmt.Errorf("failed to lookup entity: %w", err)
+					}
+
+					if entityResp != nil {
+						record.EntityName, ok = entityResp.Data["name"].(string)
+						if !ok {
+							return fmt.Errorf("failed to process entity name")
+						}
+
+						policies, ok := entityResp.Data["policies"].([]string)
+						if !ok {
+							return fmt.Errorf("failed to process policies")
+						}
+
+						if policies != nil {
+							record.Policies = policies
+							slices.Sort(record.Policies)
+						}
+
+						entityMetadata, ok := entityResp.Data["metadata"].(map[string]string)
+						if !ok {
+							return fmt.Errorf("failed to process entity metadata")
+						}
+
+						if entityMetadata != nil {
+							record.EntityMetadata = entityMetadata
+						}
+
+						entityGroupIDs, ok := entityResp.Data["group_ids"].([]string)
+						if !ok {
+							return fmt.Errorf("failed to process entity group IDs")
+						}
+
+						if entityGroupIDs != nil {
+							record.EntityGroupIDs = entityGroupIDs
+							slices.Sort(record.EntityGroupIDs)
+						}
+
+						aliases, ok := entityResp.Data["aliases"].([]interface{})
+						if !ok {
+							return fmt.Errorf("failed to process aliases")
+						}
+
+						// filter for appropriate identity alias based on the
+						// mount accessor associated with the EntityRecord
+						for _, rawAlias := range aliases {
+							alias, ok := rawAlias.(map[string]interface{})
+
+							if !ok {
+								return fmt.Errorf("failed to process alias")
+							}
+
+							aliasMountAccessor, ok := alias["mount_accessor"].(string)
+
+							if !ok || aliasMountAccessor != e.MountAccessor {
+								continue
+							}
+
+							record.EntityAliasName, ok = alias["name"].(string)
+							if !ok {
+								return fmt.Errorf("failed to process entity alias name")
+							}
+
+							record.LocalEntityAlias, ok = alias["local"].(bool)
+							if !ok {
+								return fmt.Errorf("failed to process local entity alias")
+							}
+
+							record.MountType, ok = alias["mount_type"].(string)
+							if !ok {
+								return fmt.Errorf("failed to process mount type")
+							}
+
+							record.MountPath, ok = alias["mount_path"].(string)
+							if !ok {
+								return fmt.Errorf("failed to process mount path")
+							}
+
+							entityAliasMetadata, ok := alias["metadata"].(map[string]string)
+							if !ok {
+								return fmt.Errorf("failed to process entity alias metadata")
+							}
+
+							if entityAliasMetadata != nil {
+								record.EntityAliasMetadata = entityAliasMetadata
+							}
+
+							entityAliasCustomMetadata, ok := alias["custom_metadata"].(map[string]string)
+							if !ok {
+								return fmt.Errorf("failed to process entity alias custom metadata")
+							}
+
+							if entityAliasCustomMetadata != nil {
+								record.EntityAliasCustomMetadata = entityAliasCustomMetadata
+							}
+						}
+					} else {
+						// fetch mount directly to ensure mount type and path are populated
+						// this will be necessary for non-entity client types (e.g. non-entity-token)
+						validateResp := a.core.router.ValidateMountByAccessor(e.MountAccessor)
+						if validateResp != nil {
+							record.MountPath = validateResp.MountPath
+							record.MountType = validateResp.MountType
+						}
+					}
+				}
+			}
+
+			// the format is validated above and thus we do not require a default
+			switch format {
+			case "json":
+				err := encoder.Encode(record)
+				if err != nil {
+					return err
+				}
+			case "csv":
+				csvEnc := encoder.(*csvEncoder)
+
+				if csvEnc.wroteHeader {
+					err := csvEnc.Encode(record)
+					if err != nil {
+						return err
+					}
+				} else {
+					err = csvEnc.accumulateHeaderFields(record)
+					if err != nil {
+						return err
+					}
+				}
 			}
 		}
 
 		return nil
 	}
 
-	// For each month in the filtered list walk all the log segments
+	// JSON will always walk once, CSV should only walk twice if we've processed
+	// records during the first pass
+	shouldWalk := true
 
-	for _, startTime := range filteredList {
-		err := a.WalkEntitySegments(ctx, startTime, nil, walkEntities)
-		if err != nil {
-			a.logger.Error("failed to load segments for export", "error", err)
-			return fmt.Errorf("failed to load segments for export: %w", err)
+	// CSV must perform two passes over the data to generate the column list
+	if format == "csv" {
+		for _, startTime := range filteredList {
+			err := a.WalkEntitySegments(ctx, startTime, nil, walkEntities)
+			if err != nil {
+				a.logger.Error("failed to load segments for export", "error", err)
+				return fmt.Errorf("failed to load segments for export: %w", err)
+			}
+		}
+
+		if len(dedupIDs) > 0 {
+			// only write header if we've seen some records
+			err = encoder.(*csvEncoder).writeHeader()
+			if err != nil {
+				return err
+			}
+
+			// clear dedupIDs for second pass
+			dedupIDs = make(map[string]struct{})
+		} else {
+			shouldWalk = false
+		}
+	}
+
+	if shouldWalk {
+		// For each month in the filtered list walk all the log segments
+		for _, startTime := range filteredList {
+			err := a.WalkEntitySegments(ctx, startTime, nil, walkEntities)
+			if err != nil {
+				a.logger.Error("failed to load segments for export", "error", err)
+				return fmt.Errorf("failed to load segments for export: %w", err)
+			}
 		}
 	}
 
@@ -3008,7 +3290,7 @@ func (a *ActivityLog) writeExport(ctx context.Context, rw http.ResponseWriter, f
 }
 
 type encoder interface {
-	Encode(*activity.EntityRecord) error
+	Encode(*ActivityLogExportRecord) error
 	Flush()
 	Error() error
 }
@@ -3025,7 +3307,7 @@ func newJSONEncoder(w io.Writer) *jsonEncoder {
 	}
 }
 
-func (j *jsonEncoder) Encode(er *activity.EntityRecord) error {
+func (j *jsonEncoder) Encode(er *ActivityLogExportRecord) error {
 	return j.e.Encode(er)
 }
 
@@ -3039,35 +3321,183 @@ var _ encoder = (*csvEncoder)(nil)
 
 type csvEncoder struct {
 	*csv.Writer
+	// columnIndex stores all CSV columns and their respective column index.
+	columnIndex map[string]int
+
+	// wroteHeader indicates to the encoder whether or not a header row has been written
+	wroteHeader bool
 }
 
+// baseActivityExportCSVHeader returns the base CSV header for the activity
+// export API. The existing order should not be changed. New fields should
+// be appended to the end.
+func baseActivityExportCSVHeader() []string {
+	return []string{
+		"entity_name",
+		"entity_alias_name",
+		"client_id",
+		"client_type",
+		"local_entity_alias",
+		"namespace_id",
+		"namespace_path",
+		"mount_accessor",
+		"mount_path",
+		"mount_type",
+		"timestamp",
+	}
+}
+
+// newCSVEncoder instantiates a csvEncoder with a new csv.Writer and base
+// columnIndex based on the base activity export CSV header.
 func newCSVEncoder(w io.Writer) (*csvEncoder, error) {
 	writer := csv.NewWriter(w)
 
-	err := writer.Write([]string{
-		"client_id",
-		"namespace_id",
-		"timestamp",
-		"non_entity",
-		"mount_accessor",
-	})
-	if err != nil {
-		return nil, err
+	baseColumnIndex := make(map[string]int)
+
+	for i, col := range baseActivityExportCSVHeader() {
+		baseColumnIndex[col] = i
 	}
 
 	return &csvEncoder{
-		Writer: writer,
+		Writer:      writer,
+		columnIndex: baseColumnIndex,
 	}, nil
 }
 
-// Encode converts an export bundle into a set of strings and writes them to the
-// csv writer.
-func (c *csvEncoder) Encode(e *activity.EntityRecord) error {
-	return c.Writer.Write([]string{
-		e.ClientID,
-		e.NamespaceID,
-		fmt.Sprintf("%d", e.Timestamp),
-		fmt.Sprintf("%t", e.NonEntity),
-		e.MountAccessor,
-	})
+// flattenMapField generates a flattened column name for a map field (e.g. foo.bar).
+func (c *csvEncoder) flattenMapField(fieldName string, subKey string) string {
+	return fmt.Sprintf("%s.%s", fieldName, subKey)
+}
+
+// flattenSliceField generates a flattened column name for a slice field (e.g. foo.0).
+func (c *csvEncoder) flattenSliceField(fieldName string, index int) string {
+	return fmt.Sprintf("%s.%d", fieldName, index)
+}
+
+// accumulateHeaderFields populates the columnIndex with newly discovered activity
+// export fields. Map keys and slice indices will be flattened into individual column
+// names. A map key "identity_metadata" that contains sub-keys "foo" and "bar"
+// will result in indexing the columns "identity_metadata.foo" and "identity_metadata.bar".
+// A slice "policies" with two values will result in indexing the columns "policies.0" and
+// "policies.1".
+func (c *csvEncoder) accumulateHeaderFields(record *ActivityLogExportRecord) error {
+	var recordMap map[string]interface{}
+
+	err := mapstructure.Decode(record, &recordMap)
+	if err != nil {
+		return err
+	}
+
+	for field, rawValue := range recordMap {
+		switch typedValue := rawValue.(type) {
+		case map[string]string:
+			for key := range typedValue {
+				columnName := c.flattenMapField(field, key)
+
+				if _, exists := c.columnIndex[columnName]; !exists {
+					// final index value will be chosen upon generating header
+					c.columnIndex[columnName] = exportCSVFlatteningInitIndex
+				}
+			}
+
+		case []string:
+			for idx := range typedValue {
+				columnName := c.flattenSliceField(field, idx)
+
+				if _, exists := c.columnIndex[columnName]; !exists {
+					// final index value will be chosen upon generating header
+					c.columnIndex[columnName] = exportCSVFlatteningInitIndex
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// generateHeader initially finalizes column indices for flattened fields. The
+// flattened fields are appended to the base header in lexicographical order.
+func (c *csvEncoder) generateHeader() []string {
+	header := baseActivityExportCSVHeader()
+
+	flattenedColumnNames := make([]string, 0)
+
+	for k, idx := range c.columnIndex {
+		// base header fields already have non-zero index values
+		if idx == -1 {
+			flattenedColumnNames = append(flattenedColumnNames, k)
+		}
+	}
+
+	// sort to provide deterministic column ordering for flattened fields
+	slices.Sort(flattenedColumnNames)
+
+	for _, columnName := range flattenedColumnNames {
+		c.columnIndex[columnName] = len(header)
+		header = append(header, columnName)
+	}
+
+	return header
+}
+
+// writeHeader will write a CSV header if it has not already been written
+func (c *csvEncoder) writeHeader() error {
+	if !c.wroteHeader {
+
+		err := c.Writer.Write(c.generateHeader())
+		if err != nil {
+			return err
+		}
+
+		c.wroteHeader = true
+	}
+
+	return nil
+}
+
+// Encode converts an ActivityLogExportRecord into a row of CSV data. Map and
+// slice fields are flattened in the process. The resulting CSV row is
+// written to the underlying CSV writer.
+func (c *csvEncoder) Encode(record *ActivityLogExportRecord) error {
+	row := make([]string, len(c.columnIndex))
+
+	var recordMap map[string]interface{}
+	err := mapstructure.Decode(record, &recordMap)
+	if err != nil {
+		return err
+	}
+
+	for col, rawValue := range recordMap {
+		switch typedValue := rawValue.(type) {
+		case string:
+			if idx, ok := c.columnIndex[col]; ok {
+				row[idx] = typedValue
+			}
+
+		case bool:
+			if idx, ok := c.columnIndex[col]; ok {
+				row[idx] = strconv.FormatBool(typedValue)
+			}
+
+		case map[string]string:
+			for key, val := range typedValue {
+				columnName := c.flattenMapField(col, key)
+
+				if idx, ok := c.columnIndex[columnName]; ok {
+					row[idx] = val
+				}
+			}
+
+		case []string:
+			for idx, val := range typedValue {
+				columnName := c.flattenSliceField(col, idx)
+
+				if idx, ok := c.columnIndex[columnName]; ok {
+					row[idx] = val
+				}
+			}
+		}
+	}
+
+	return c.Writer.Write(row)
 }

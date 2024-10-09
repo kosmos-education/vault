@@ -5,6 +5,7 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"runtime/debug"
@@ -14,7 +15,6 @@ import (
 	"github.com/go-jose/go-jose/v3/jwt"
 	"github.com/hashicorp/eventlogger"
 	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/go-multierror"
 	nshelper "github.com/hashicorp/vault/helper/namespace"
 	"github.com/hashicorp/vault/sdk/helper/jsonutil"
 	"github.com/hashicorp/vault/sdk/helper/salt"
@@ -121,7 +121,7 @@ func (f *entryFormatter) Process(ctx context.Context, e *eventlogger.Event) (_ *
 			"stacktrace", string(debug.Stack()))
 
 		// Ensure that we add this error onto any pre-existing error that was being returned.
-		retErr = multierror.Append(retErr, fmt.Errorf("panic generating audit log: %q", f.name)).ErrorOrNil()
+		retErr = errors.Join(retErr, fmt.Errorf("panic generating audit log: %q", f.name))
 	}()
 
 	// Using 'any' to make exclusion easier, the JSON encoder doesn't care about types.
@@ -130,6 +130,17 @@ func (f *entryFormatter) Process(ctx context.Context, e *eventlogger.Event) (_ *
 	entry, err = f.createEntry(ctx, a)
 	if err != nil {
 		return nil, err
+	}
+
+	// If this pipeline has been configured with (Enterprise-only) exclusions then
+	// attempt to exclude the fields from the audit entry.
+	if f.shouldExclude() {
+		m, err := f.excludeFields(entry)
+		if err != nil {
+			return nil, fmt.Errorf("unable to exclude %s audit data from %q: %w", a.Subtype, f.name, err)
+		}
+
+		entry = m
 	}
 
 	result, err := jsonutil.EncodeJSON(entry)
