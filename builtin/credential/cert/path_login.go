@@ -17,8 +17,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/hashicorp/vault/sdk/helper/locksutil"
-
 	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/vault/sdk/framework"
