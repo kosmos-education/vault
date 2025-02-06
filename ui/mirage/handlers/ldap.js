@@ -10,6 +10,7 @@ export default function (server) {
     const { name, backend } = req.params;
     return name ? { name } : { backend };
   };
+
   const getRecord = (schema, req, dbKey) => {
     const record = schema.db[dbKey].findBy(query(req));
     if (record) {
@@ -21,6 +22,7 @@ export default function (server) {
     }
     return new Response(404, {}, { errors: [] });
   };
+
   const createOrUpdateRecord = (schema, req, dbKey) => {
     const data = JSON.parse(req.requestBody);
     const dbCollection = schema.db[dbKey];
@@ -28,6 +30,7 @@ export default function (server) {
     dbCollection.update(query(req), data);
     return new Response(204);
   };
+
   const listRecords = (schema, dbKey, query = {}) => {
     const records = schema.db[dbKey].where(query);
     const keys = records.map(({ name }) => {
@@ -46,27 +49,18 @@ export default function (server) {
   };
 
   const listOrGetRecord = (schema, req, type) => {
-    // if the param name is admin, we want to LIST admin/ roles
+    const dbKey = type ? 'ldapRoles' : 'ldapLibraries';
+    const query = type ? { type, name: `admin/child-${type}-role` } : { name: 'admin/test-library' };
     if (req.queryParams.list) {
-      // passing a query with specific name is not flexible
-      // but we only seeded the mirage db with one hierarchical role for each type
-      return listRecords(schema, 'ldapRoles', { type, name: `admin/child-${type}-role` });
+      // the mirage database has setup all hierarchical names to be prefixed with "admin/"
+      // while passing a query with specific name is not flexible, for simplicity
+      // we only seeded the mirage db with one hierarchical resource for each role and a library
+      return listRecords(schema, dbKey, query);
     }
-    // otherwise we want to view details for a specific role
-    return getRecord(schema, req, 'ldapRoles', type);
+    // otherwise we want to view details for a specific resource
+    return getRecord(schema, req, dbKey);
   };
 
-  // mount
-  server.post('/sys/mounts/:path', () => new Response(204));
-  server.get('/sys/internal/ui/mounts/:path', () => ({
-    data: {
-      accessor: 'ldap_ade94329',
-      type: 'ldap',
-      path: 'ldap-test/',
-      uuid: '35e9119d-5708-4b6b-58d2-f913e27f242d',
-      config: {},
-    },
-  }));
   // config
   server.post('/:backend/config', (schema, req) => createOrUpdateRecord(schema, req, 'ldapConfigs'));
   server.get('/:backend/config', (schema, req) => getRecord(schema, req, 'ldapConfigs'));
@@ -88,10 +82,62 @@ export default function (server) {
   }));
   // libraries
   server.post('/:backend/library/:name', (schema, req) => createOrUpdateRecord(schema, req, 'ldapLibraries'));
-  server.get('/:backend/library/:name', (schema, req) => getRecord(schema, req, 'ldapLibraries'));
+  server.get('/:backend/library/*name', (schema, req) => listOrGetRecord(schema, req));
   server.get('/:backend/library', (schema) => listRecords(schema, 'ldapLibraries'));
-  server.get('/:backend/library/:name/status', () => ({
-    'bob.johnson': { available: false, borrower_client_token: '8b80c305eb3a7dbd161ef98f10ea60a116ce0910' },
-    'mary.smith': { available: true },
-  }));
+  server.get('/:backend/library/*name/status', (schema) => {
+    const data = schema.db['ldapAccountStatuses'].reduce((prev, curr) => {
+      prev[curr.account] = {
+        available: curr.available,
+        borrower_client_token: curr.borrower_client_token,
+      };
+      return prev;
+    }, {});
+    return { data };
+  });
+  // check-out / check-in
+  server.post('/:backend/library/:set_name/check-in', (schema, req) => {
+    // Check-in makes an unavailable account available again
+    const { service_account_names } = JSON.parse(req.requestBody);
+    const dbCollection = schema.db['ldapAccountStatuses'];
+    const updated = dbCollection.find(service_account_names).map((f) => ({
+      ...f,
+      available: true,
+      borrower_client_token: undefined,
+    }));
+    updated.forEach((u) => {
+      dbCollection.update(u.id, u);
+    });
+    return {
+      data: {
+        check_ins: service_account_names,
+      },
+    };
+  });
+  server.post('/:backend/library/:set_name/check-out', (schema, req) => {
+    const { set_name, backend } = req.params;
+    const dbCollection = schema.db['ldapAccountStatuses'];
+    const available = dbCollection.where({ available: true });
+    if (available) {
+      return Response(404, {}, { errors: ['no accounts available to check out'] });
+    }
+    const checkOut = {
+      ...available[0],
+      available: false,
+      borrower_client_token: crypto.randomUUID(),
+    };
+    dbCollection.update(checkOut.id, checkOut);
+    return {
+      request_id: '364a17d4-e5ab-998b-ceee-b49929229e0c',
+      lease_id: `${backend}/library/${set_name}/check-out/aoBsaBEI4PK96VnukubvYDlZ`,
+      renewable: true,
+      lease_duration: 36000,
+      data: {
+        password: crypto.randomUUID(),
+        service_account_name: checkOut.account,
+      },
+      wrap_info: null,
+      warnings: null,
+      auth: null,
+    };
+  });
 }
