@@ -31,7 +31,7 @@ interface Option {
 }
 
 export default class LdapLibrariesPageComponent extends Component<Args> {
-  @service declare readonly router: RouterService;
+  @service('app-router') declare readonly router: RouterService;
 
   @tracked selectedRole: LdapRoleModel | undefined;
 

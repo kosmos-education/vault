@@ -24,8 +24,10 @@ import (
 	"github.com/hashicorp/go-uuid"
 	goversion "github.com/hashicorp/go-version"
 	lru "github.com/hashicorp/golang-lru/v2"
+	raftlib "github.com/hashicorp/raft"
 	"github.com/hashicorp/vault/api"
 	httpPriority "github.com/hashicorp/vault/http/priority"
+	"github.com/hashicorp/vault/internalshared/configutil"
 	"github.com/hashicorp/vault/physical/raft"
 	"github.com/hashicorp/vault/sdk/helper/jsonutil"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -164,6 +166,7 @@ func (c *Core) startRaftBackend(ctx context.Context) (retErr error) {
 			ClusterListener:     c.getClusterListener(),
 			StartAsLeader:       creating,
 			EffectiveSDKVersion: c.effectiveSDKVersion,
+			RemovedCallback:     c.shutdownRemovedNode,
 		}); err != nil {
 			return err
 		}
@@ -763,7 +766,12 @@ func (c *Core) raftCreateTLSKeyring(ctx context.Context) (*raft.TLSKeyring, erro
 	}
 
 	if raftTLSEntry != nil {
-		return nil, fmt.Errorf("TLS keyring already present")
+		// For Raft storage, the keyring should already be there, but
+		// for situations with non-Raft storage and Raft HA, we can ignore this,
+		// as it will need to be remade.
+		if _, usingRaftStorage := c.underlyingPhysical.(*raft.RaftBackend); usingRaftStorage {
+			return nil, fmt.Errorf("TLS keyring already present")
+		}
 	}
 
 	raftTLS, err := raft.GenerateTLSKey(c.secureRandomReader)
@@ -927,6 +935,12 @@ func (c *Core) InitiateRetryJoin(ctx context.Context) error {
 	c.logger.Info("raft retry join initiated")
 
 	if _, err = c.JoinRaftCluster(ctx, leaderInfos, raftBackend.NonVoter()); err != nil {
+		// If the node has been removed, we should continue to startup but in
+		// the removed state
+		if errors.Is(err, errRemovedHANode) {
+			c.logger.Error("failed to join raft cluster", "error", err)
+			return nil
+		}
 		return err
 	}
 
@@ -1040,6 +1054,13 @@ func (c *Core) JoinRaftCluster(ctx context.Context, leaderInfos []*raft.LeaderJo
 	}
 
 	isRaftHAOnly := c.isRaftHAOnly()
+	if raftBackend.IsRemoved() {
+		if isRaftHAOnly {
+			return false, fmt.Errorf("%w. Raft data for this node must be cleaned up before it can be added back", errRemovedHANode)
+		} else {
+			return false, fmt.Errorf("%w. All vault data for this node must be cleaned up before it can be added back", errRemovedHANode)
+		}
+	}
 	// Prevent join from happening if we're using raft for storage and
 	// it has already been initialized.
 	if init && !isRaftHAOnly {
@@ -1281,7 +1302,7 @@ func (c *Core) raftLeaderInfo(leaderInfo *raft.LeaderJoinInfo, disco *discover.D
 		}
 		for _, ip := range clusterIPs {
 			addr := formatDiscoveredAddr(ip, port)
-			u := fmt.Sprintf("%s://%s", scheme, addr)
+			u := configutil.NormalizeAddr(fmt.Sprintf("%s://%s", scheme, addr))
 			info := *leaderInfo
 			info.LeaderAPIAddr = u
 			ret = append(ret, &info)
@@ -1300,6 +1321,25 @@ func NewDelegateForCore(c *Core) *raft.Delegate {
 		c.logger.Error("failed to load autopilot persisted state from storage", "error", err)
 	}
 	return raft.NewDelegate(c.getRaftBackend(), persistedState, c.saveAutopilotPersistedState)
+}
+
+func (c *Core) ReloadRaftConfig(config map[string]string) error {
+	rb := c.getRaftBackend()
+	if rb == nil {
+		return nil
+	}
+	raftConfig := raftlib.DefaultConfig()
+	if err := raft.ApplyConfigSettings(c.logger, config, raftConfig); err != nil {
+		return err
+	}
+	rlconfig := raftlib.ReloadableConfig{
+		TrailingLogs:      raftConfig.TrailingLogs,
+		SnapshotInterval:  raftConfig.SnapshotInterval,
+		SnapshotThreshold: raftConfig.SnapshotThreshold,
+		HeartbeatTimeout:  raftConfig.HeartbeatTimeout,
+		ElectionTimeout:   raftConfig.ElectionTimeout,
+	}
+	return rb.ReloadConfig(rlconfig)
 }
 
 // getRaftBackend returns the RaftBackend from the HA or physical backend,
@@ -1402,6 +1442,7 @@ func (c *Core) joinRaftSendAnswer(ctx context.Context, sealAccess seal.Access, r
 	opts := raft.SetupOpts{
 		TLSKeyring:      answerResp.Data.TLSKeyring,
 		ClusterListener: c.getClusterListener(),
+		RemovedCallback: c.shutdownRemovedNode,
 	}
 	err = raftBackend.SetupCluster(ctx, opts)
 	if err != nil {
@@ -1457,7 +1498,8 @@ func (c *Core) RaftBootstrap(ctx context.Context, onInit bool) error {
 	}
 
 	raftOpts := raft.SetupOpts{
-		StartAsLeader: true,
+		StartAsLeader:   true,
+		RemovedCallback: c.shutdownRemovedNode,
 	}
 
 	if !onInit {

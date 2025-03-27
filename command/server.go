@@ -119,6 +119,7 @@ type ServerCommand struct {
 	flagConfigs            []string
 	flagRecovery           bool
 	flagExperiments        []string
+	flagCLIDump            string
 	flagDev                bool
 	flagDevTLS             bool
 	flagDevTLSCertDir      string
@@ -221,6 +222,13 @@ func (c *ServerCommand) Flags() *FlagSets {
 			"Valid experiments are: " + strings.Join(experiments.ValidExperiments(), ", "),
 	})
 
+	f.StringVar(&StringVar{
+		Name:       "pprof-dump-dir",
+		Target:     &c.flagCLIDump,
+		Completion: complete.PredictDirs("*"),
+		Usage:      "Directory where generated profiles are created. If left unset, files are not generated.",
+	})
+
 	f = set.NewFlagSet("Dev Options")
 
 	f.BoolVar(&BoolVar{
@@ -270,11 +278,12 @@ func (c *ServerCommand) Flags() *FlagSets {
 	})
 
 	f.StringVar(&StringVar{
-		Name:    "dev-listen-address",
-		Target:  &c.flagDevListenAddr,
-		Default: "127.0.0.1:8200",
-		EnvVar:  "VAULT_DEV_LISTEN_ADDRESS",
-		Usage:   "Address to bind to in \"dev\" mode.",
+		Name:        "dev-listen-address",
+		Target:      &c.flagDevListenAddr,
+		Default:     "127.0.0.1:8200",
+		EnvVar:      "VAULT_DEV_LISTEN_ADDRESS",
+		Usage:       "Address to bind to in \"dev\" mode.",
+		Normalizers: []func(string) string{configutil.NormalizeAddr},
 	})
 	f.BoolVar(&BoolVar{
 		Name:    "dev-no-store-token",
@@ -506,7 +515,7 @@ func (c *ServerCommand) runRecoveryMode() int {
 	}
 	if config.Storage.Type == storageTypeRaft || (config.HAStorage != nil && config.HAStorage.Type == storageTypeRaft) {
 		if envCA := os.Getenv("VAULT_CLUSTER_ADDR"); envCA != "" {
-			config.ClusterAddr = envCA
+			config.ClusterAddr = configutil.NormalizeAddr(envCA)
 		}
 
 		if len(config.ClusterAddr) == 0 {
@@ -734,9 +743,9 @@ func (c *ServerCommand) runRecoveryMode() int {
 func logProxyEnvironmentVariables(logger hclog.Logger) {
 	proxyCfg := httpproxy.FromEnvironment()
 	cfgMap := map[string]string{
-		"http_proxy":  proxyCfg.HTTPProxy,
-		"https_proxy": proxyCfg.HTTPSProxy,
-		"no_proxy":    proxyCfg.NoProxy,
+		"http_proxy":  configutil.NormalizeAddr(proxyCfg.HTTPProxy),
+		"https_proxy": configutil.NormalizeAddr(proxyCfg.HTTPSProxy),
+		"no_proxy":    configutil.NormalizeAddr(proxyCfg.NoProxy),
 	}
 	for k, v := range cfgMap {
 		u, err := url.Parse(v)
@@ -790,7 +799,7 @@ func (c *ServerCommand) setupStorage(config *server.Config) (physical.Backend, e
 		}
 	case storageTypeRaft:
 		if envCA := os.Getenv("VAULT_CLUSTER_ADDR"); envCA != "" {
-			config.ClusterAddr = envCA
+			config.ClusterAddr = configutil.NormalizeAddr(envCA)
 		}
 		if len(config.ClusterAddr) == 0 {
 			return nil, errors.New("Cluster address must be set when using raft storage")
@@ -1589,6 +1598,11 @@ func (c *ServerCommand) Run(args []string) int {
 		coreShutdownDoneCh = core.ShutdownDone()
 	}
 
+	cliDumpCh := make(chan struct{})
+	if c.flagCLIDump != "" {
+		go func() { cliDumpCh <- struct{}{} }()
+	}
+
 	// Wait for shutdown
 	shutdownTriggered := false
 	retCode := 0
@@ -1624,6 +1638,10 @@ func (c *ServerCommand) Run(args []string) int {
 			// reporting Errors found in the config
 			for _, cErr := range configErrors {
 				c.logger.Warn(cErr.String())
+			}
+
+			if err := core.ReloadRaftConfig(config.Storage.Config); err != nil {
+				c.logger.Warn("error reloading raft config", "error", err.Error())
 			}
 
 			// Note that seal reloading can also be triggered via Core.TriggerSealReload.
@@ -1703,8 +1721,8 @@ func (c *ServerCommand) Run(args []string) int {
 
 			// Notify systemd that the server has completed reloading config
 			c.notifySystemd(systemd.SdNotifyReady)
-
 		case <-c.SigUSR2Ch:
+			c.logger.Info("Received SIGUSR2, dumping goroutines. This is expected behavior. Vault continues to run normally.")
 			logWriter := c.logger.StandardWriter(&hclog.StandardLoggerOptions{})
 			pprof.Lookup("goroutine").WriteTo(logWriter, 2)
 
@@ -1755,6 +1773,51 @@ func (c *ServerCommand) Run(args []string) int {
 			}
 
 			c.logger.Info(fmt.Sprintf("Wrote pprof files to: %s", pprofPath))
+		case <-cliDumpCh:
+			path := c.flagCLIDump
+
+			if _, err := os.Stat(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				c.logger.Error("Checking cli dump path failed", "error", err)
+				continue
+			}
+
+			pprofPath := filepath.Join(path, "vault-pprof")
+			err := os.MkdirAll(pprofPath, os.ModePerm)
+			if err != nil {
+				c.logger.Error("Could not create temporary directory for pprof", "error", err)
+				continue
+			}
+
+			dumps := []string{"goroutine", "heap", "allocs", "threadcreate", "profile"}
+			for _, dump := range dumps {
+				pFile, err := os.Create(filepath.Join(pprofPath, dump))
+				if err != nil {
+					c.logger.Error("error creating pprof file", "name", dump, "error", err)
+					break
+				}
+
+				if dump != "profile" {
+					err = pprof.Lookup(dump).WriteTo(pFile, 0)
+					if err != nil {
+						c.logger.Error("error generating pprof data", "name", dump, "error", err)
+						pFile.Close()
+						break
+					}
+				} else {
+					// CPU profiles need to run for a duration so we're going to run it
+					// just for one second to avoid blocking here.
+					if err := pprof.StartCPUProfile(pFile); err != nil {
+						c.logger.Error("could not start CPU profile: ", err)
+						pFile.Close()
+						break
+					}
+					time.Sleep(time.Second * 1)
+					pprof.StopCPUProfile()
+				}
+				pFile.Close()
+			}
+
+			c.logger.Info(fmt.Sprintf("Wrote startup pprof files to: %s", pprofPath))
 		}
 	}
 	// Notify systemd that the server is shutting down
@@ -2185,7 +2248,7 @@ func (c *ServerCommand) detectRedirect(detect physical.RedirectDetect,
 	}
 
 	// Return the URL string
-	return url.String(), nil
+	return configutil.NormalizeAddr(url.String()), nil
 }
 
 func (c *ServerCommand) Reload(lock *sync.RWMutex, reloadFuncs *map[string][]reloadutil.ReloadFunc, configPath []string, core *vault.Core) error {
@@ -2691,11 +2754,11 @@ func initHaBackend(c *ServerCommand, config *server.Config, coreConfig *vault.Co
 func determineRedirectAddr(c *ServerCommand, coreConfig *vault.CoreConfig, config *server.Config) error {
 	var retErr error
 	if envRA := os.Getenv("VAULT_API_ADDR"); envRA != "" {
-		coreConfig.RedirectAddr = envRA
+		coreConfig.RedirectAddr = configutil.NormalizeAddr(envRA)
 	} else if envRA := os.Getenv("VAULT_REDIRECT_ADDR"); envRA != "" {
-		coreConfig.RedirectAddr = envRA
+		coreConfig.RedirectAddr = configutil.NormalizeAddr(envRA)
 	} else if envAA := os.Getenv("VAULT_ADVERTISE_ADDR"); envAA != "" {
-		coreConfig.RedirectAddr = envAA
+		coreConfig.RedirectAddr = configutil.NormalizeAddr(envAA)
 	}
 
 	// Attempt to detect the redirect address, if possible
@@ -2727,7 +2790,7 @@ func determineRedirectAddr(c *ServerCommand, coreConfig *vault.CoreConfig, confi
 		if c.flagDevTLS {
 			protocol = "https"
 		}
-		coreConfig.RedirectAddr = fmt.Sprintf("%s://%s", protocol, config.Listeners[0].Address)
+		coreConfig.RedirectAddr = configutil.NormalizeAddr(fmt.Sprintf("%s://%s", protocol, config.Listeners[0].Address))
 	}
 	return retErr
 }
@@ -2736,7 +2799,7 @@ func findClusterAddress(c *ServerCommand, coreConfig *vault.CoreConfig, config *
 	if disableClustering {
 		coreConfig.ClusterAddr = ""
 	} else if envCA := os.Getenv("VAULT_CLUSTER_ADDR"); envCA != "" {
-		coreConfig.ClusterAddr = envCA
+		coreConfig.ClusterAddr = configutil.NormalizeAddr(envCA)
 	} else {
 		var addrToUse string
 		switch {
@@ -2768,7 +2831,7 @@ func findClusterAddress(c *ServerCommand, coreConfig *vault.CoreConfig, config *
 		u.Host = net.JoinHostPort(host, strconv.Itoa(nPort+1))
 		// Will always be TLS-secured
 		u.Scheme = "https"
-		coreConfig.ClusterAddr = u.String()
+		coreConfig.ClusterAddr = configutil.NormalizeAddr(u.String())
 	}
 
 CLUSTER_SYNTHESIS_COMPLETE:

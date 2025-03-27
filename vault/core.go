@@ -45,6 +45,7 @@ import (
 	"github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/audit"
 	"github.com/hashicorp/vault/command/server"
+	"github.com/hashicorp/vault/helper/activationflags"
 	"github.com/hashicorp/vault/helper/identity/mfa"
 	"github.com/hashicorp/vault/helper/locking"
 	"github.com/hashicorp/vault/helper/metricsutil"
@@ -422,6 +423,9 @@ type Core struct {
 	// renewal, expiration and revocation
 	expiration *ExpirationManager
 
+	// the rotation manager handles periodic rotation of credentials
+	rotationManager *RotationManager
+
 	// rollback manager is used to run rollbacks periodically
 	rollback *RollbackManager
 
@@ -530,6 +534,8 @@ type Core struct {
 	rpcClientConn *grpc.ClientConn
 	// The grpc forwarding client
 	rpcForwardingClient *forwardingClient
+	// The time of the last successful request forwarding heartbeat
+	rpcLastSuccessfulHeartbeat *atomic.Value
 	// The UUID used to hold the leader lock. Only set on active node
 	leaderUUID string
 
@@ -734,6 +740,9 @@ type Core struct {
 	clusterAddrBridge *raft.ClusterAddrBridge
 
 	censusManager *CensusManager
+
+	// Activation flags for enterprise features that require a one-time activation
+	FeatureActivationFlags *activationflags.FeatureActivationFlags
 }
 
 func (c *Core) ActiveNodeClockSkewMillis() int64 {
@@ -1093,6 +1102,7 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 		echoDuration:                   uberAtomic.NewDuration(0),
 		activeNodeClockSkewMillis:      uberAtomic.NewInt64(0),
 		periodicLeaderRefreshInterval:  conf.PeriodicLeaderRefreshInterval,
+		rpcLastSuccessfulHeartbeat:     new(atomic.Value),
 	}
 
 	c.standbyStopCh.Store(make(chan struct{}))
@@ -1442,11 +1452,14 @@ func (c *Core) configureLogicalBackends(backends map[string]logical.Factory, log
 	// System
 	logicalBackends[mountTypeSystem] = func(ctx context.Context, config *logical.BackendConfig) (logical.Backend, error) {
 		sysBackendLogger := logger.Named("system")
+
 		c.AddLogger(sysBackendLogger)
 		b := NewSystemBackend(c, sysBackendLogger, config)
+
 		if err := b.Setup(ctx, config); err != nil {
 			return nil, err
 		}
+
 		return b, nil
 	}
 
@@ -1454,7 +1467,18 @@ func (c *Core) configureLogicalBackends(backends map[string]logical.Factory, log
 	logicalBackends[mountTypeIdentity] = func(ctx context.Context, config *logical.BackendConfig) (logical.Backend, error) {
 		identityLogger := logger.Named("identity")
 		c.AddLogger(identityLogger)
-		return NewIdentityStore(ctx, c, config, identityLogger)
+
+		idStore, err := NewIdentityStore(ctx, c, config, identityLogger)
+		if err != nil {
+			return nil, fmt.Errorf("error creating identity store: %w", err)
+		}
+
+		// Wire up the idStoreBackend to support the activation flag
+		if c.systemBackend != nil {
+			c.systemBackend.idStoreBackend = idStore.Backend
+		}
+
+		return idStore, nil
 	}
 
 	c.logicalBackends = logicalBackends
@@ -2458,7 +2482,7 @@ func (s standardUnsealStrategy) unseal(ctx context.Context, logger log.Logger, c
 	}
 
 	// Run setup-like functions
-	if err := runUnsealSetupFunctions(ctx, buildUnsealSetupFunctionSlice(c)); err != nil {
+	if err := runUnsealSetupFunctions(ctx, buildUnsealSetupFunctionSlice(c, true)); err != nil {
 		return err
 	}
 
@@ -2559,7 +2583,7 @@ func (c *Core) setupPluginCatalog(ctx context.Context) error {
 // buildUnsealSetupFunctionSlice returns a slice of functions, tailored for this
 // Core's replication state, that can be passed to the runUnsealSetupFunctions
 // function.
-func buildUnsealSetupFunctionSlice(c *Core) []func(context.Context) error {
+func buildUnsealSetupFunctionSlice(c *Core, isActive bool) []func(context.Context) error {
 	// setupFunctions is a slice of functions that need to be called in order,
 	// that if any return an error, processing should immediately cease.
 	setupFunctions := []func(context.Context) error{
@@ -2609,10 +2633,18 @@ func buildUnsealSetupFunctionSlice(c *Core) []func(context.Context) error {
 		setupFunctions = append(setupFunctions, func(_ context.Context) error {
 			return c.setupExpiration(expireLeaseStrategyFairsharing)
 		})
+		setupFunctions = append(setupFunctions, func(_ context.Context) error {
+			return c.startRotation()
+		})
 		setupFunctions = append(setupFunctions, c.loadAudits)
 		setupFunctions = append(setupFunctions, c.setupAuditedHeadersConfig)
 		setupFunctions = append(setupFunctions, c.setupAudits)
-		setupFunctions = append(setupFunctions, c.loadIdentityStoreArtifacts)
+		setupFunctions = append(setupFunctions, func(ctx context.Context) error {
+			if c.identityStore == nil {
+				return nil
+			}
+			return c.identityStore.loadArtifacts(ctx, isActive)
+		})
 		setupFunctions = append(setupFunctions, func(ctx context.Context) error {
 			return loadPolicyMFAConfigs(ctx, c)
 		})
@@ -2906,6 +2938,9 @@ func (c *Core) preSeal() error {
 	}
 	if err := c.stopExpiration(); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error stopping expiration: %w", err))
+	}
+	if err := c.stopRotation(); err != nil {
+		result = multierror.Append(result, fmt.Errorf("error stopping rotation: %w", err))
 	}
 	if err := c.teardownCredentials(context.Background()); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error tearing down credentials: %w", err))
@@ -4626,3 +4661,24 @@ func (c *Core) setupAuditedHeadersConfig(ctx context.Context) error {
 
 	return nil
 }
+
+// IsRemovedFromCluster checks whether this node has been removed from the
+// cluster. This is only applicable to physical HA backends that satisfy the
+// RemovableNodeHABackend interface. The value of the `ok` result will be false
+// if the HA and underlyingPhysical backends are nil or do not support this operation.
+func (c *Core) IsRemovedFromCluster() (removed, ok bool) {
+	removableNodeHA := c.getRemovableHABackend()
+	if removableNodeHA == nil {
+		return false, false
+	}
+
+	return removableNodeHA.IsRemoved(), true
+}
+
+func (c *Core) shutdownRemovedNode() {
+	go func() {
+		c.ShutdownCoreError(errRemovedHANode)
+	}()
+}
+
+var errRemovedHANode = errors.New("node has been removed from the HA cluster")

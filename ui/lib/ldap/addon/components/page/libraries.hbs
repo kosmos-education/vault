@@ -59,35 +59,31 @@
               />
               {{#if (this.isHierarchical library.name)}}
                 <dd.Interactive
-                  @text="Content"
                   data-test-subdirectory
                   @route="libraries.subdirectory"
                   @model={{library.completeLibraryName}}
-                />
+                >Content</dd.Interactive>
               {{else}}
                 {{#if library.canEdit}}
                   <dd.Interactive
-                    @text="Edit"
                     data-test-edit
                     @route="libraries.library.edit"
                     @model={{library.completeLibraryName}}
-                  />
+                  >Edit</dd.Interactive>
                 {{/if}}
                 {{#if library.canRead}}
                   <dd.Interactive
-                    @text="Details"
                     data-test-details
                     @route="libraries.library.details"
                     @model={{library.completeLibraryName}}
-                  />
+                  >Details</dd.Interactive>
                 {{/if}}
                 {{#if library.canDelete}}
                   <dd.Interactive
-                    @text="Delete"
                     data-test-delete
                     @color="critical"
                     {{on "click" (fn (mut this.libraryToDelete) library)}}
-                  />
+                  >Delete</dd.Interactive>
                 {{/if}}
               {{/if}}
             </Hds::Dropdown>

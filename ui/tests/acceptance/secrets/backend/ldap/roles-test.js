@@ -13,8 +13,8 @@ import authPage from 'vault/tests/pages/auth';
 import { click, fillIn, waitFor } from '@ember/test-helpers';
 import { assertURL, isURL, visitURL } from 'vault/tests/helpers/ldap/ldap-helpers';
 import { GENERAL } from 'vault/tests/helpers/general-selectors';
-import { LDAP_SELECTORS } from 'vault/tests/helpers/ldap/ldap-selectors';
 import { deleteEngineCmd, mountEngineCmd, runCmd } from 'vault/tests/helpers/commands';
+import { LDAP_SELECTORS } from 'vault/tests/helpers/ldap/ldap-selectors';
 
 module('Acceptance | ldap | roles', function (hooks) {
   setupApplicationTest(hooks);
