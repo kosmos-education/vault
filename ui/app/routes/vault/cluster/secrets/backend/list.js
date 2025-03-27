@@ -7,7 +7,7 @@ import { set } from '@ember/object';
 import { hash } from 'rsvp';
 import Route from '@ember/routing/route';
 import { supportedSecretBackends } from 'vault/helpers/supported-secret-backends';
-import { allEngines, isAddonEngine } from 'vault/helpers/mountable-secret-engines';
+import { allEngines, isAddonEngine, CONFIGURATION_ONLY } from 'vault/helpers/mountable-secret-engines';
 import { service } from '@ember/service';
 import { normalizePath } from 'vault/utils/path-encoding-helpers';
 import { assert } from '@ember/debug';
@@ -30,6 +30,7 @@ function getValidPage(pageParam) {
 }
 
 export default Route.extend({
+  pagination: service(),
   store: service(),
   templateName: 'vault/cluster/secrets/backend/list',
   pathHelp: service('path-help'),
@@ -83,8 +84,12 @@ export default Route.extend({
     const secretEngine = this.store.peekRecord('secret-engine', backend);
     const type = secretEngine?.engineType;
     assert('secretEngine.engineType is not defined', !!type);
-    const engineRoute = allEngines().find((engine) => engine.type === type)?.engineRoute;
+    // if configuration only, redirect to configuration route
+    if (CONFIGURATION_ONLY.includes(type)) {
+      return this.router.transitionTo('vault.cluster.secrets.backend.configuration', backend);
+    }
 
+    const engineRoute = allEngines().find((engine) => engine.type === type)?.engineRoute;
     if (!type || !SUPPORTED_BACKENDS.includes(type)) {
       return this.router.transitionTo('vault.cluster.secrets');
     }
@@ -131,7 +136,7 @@ export default Route.extend({
 
     return hash({
       secret,
-      secrets: this.store
+      secrets: this.pagination
         .lazyPaginatedQuery(modelType, {
           id: secret,
           backend,
@@ -163,7 +168,7 @@ export default Route.extend({
     const has404 = this.has404;
     // only clear store cache if this is a new model
     if (secret !== controller?.baseKey?.id) {
-      this.store.clearAllDatasets();
+      this.pagination.clearDataset();
     }
     controller.set('hasModel', true);
     controller.setProperties({
@@ -220,12 +225,12 @@ export default Route.extend({
     willTransition(transition) {
       window.scrollTo(0, 0);
       if (transition.targetName !== this.routeName) {
-        this.store.clearAllDatasets();
+        this.pagination.clearDataset();
       }
       return true;
     },
     reload() {
-      this.store.clearAllDatasets();
+      this.pagination.clearDataset();
       this.refresh();
     },
   },

@@ -50,6 +50,7 @@ import (
 	"github.com/hashicorp/vault/helper/testhelpers/teststorage"
 	vaulthttp "github.com/hashicorp/vault/http"
 	"github.com/hashicorp/vault/sdk/helper/certutil"
+	"github.com/hashicorp/vault/sdk/helper/cryptoutil"
 	"github.com/hashicorp/vault/sdk/helper/testhelpers/schema"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/hashicorp/vault/vault"
@@ -297,6 +298,87 @@ func TestBackend_CSRValues(t *testing.T) {
 	logicaltest.Test(t, testCase)
 }
 
+func TestBackend_SerialNumberSource(t *testing.T) {
+	t.Parallel()
+	b, s := CreateBackendWithStorage(t)
+
+	var err error
+
+	_, err = CBWrite(b, s, "root/generate/internal", map[string]interface{}{
+		"ttl":         "40h",
+		"common_name": "myvault.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = CBWrite(b, s, "roles/json-csr", map[string]interface{}{
+		"allow_any_name":         true,
+		"enforce_hostnames":      false,
+		"allowed_serial_numbers": "foo*",
+		"serial_number_source":   "json-csr",
+		"key_type":               "any",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = CBWrite(b, s, "roles/json", map[string]interface{}{
+		"allow_any_name":         true,
+		"enforce_hostnames":      false,
+		"allowed_serial_numbers": "foo*",
+		"serial_number_source":   "json",
+		"key_type":               "any",
+	})
+
+	// Create a CSR with a serial number not allowed by the role.
+	tmpl := &x509.CertificateRequest{
+		Subject: pkix.Name{SerialNumber: "bar"},
+	}
+	_, _, csrPem := generateCSR(t, tmpl, "ec", 256)
+
+	// Signing a csr with a disallowed subject serial number in the CSR
+	// with serial_number_source=json-csr should fail.
+	_, err = CBWrite(b, s, "sign/json-csr", map[string]interface{}{
+		"common_name": "localhost",
+		"csr":         csrPem,
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+
+	// The serial number in the request should take precedence.
+	_, err = CBWrite(b, s, "sign/json-csr", map[string]interface{}{
+		"common_name":   "localhost",
+		"csr":           csrPem,
+		"serial_number": "foobar",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Try signing the cert with serial_number_source=json.
+	// The serial in the CSR should be ignored.
+	_, err = CBWrite(b, s, "sign/json", map[string]interface{}{
+		"common_name": "localhost",
+		"csr":         csrPem,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Try signing the cert with serial_number_source=json
+	// and a serial number in the request
+	_, err = CBWrite(b, s, "sign/json", map[string]interface{}{
+		"common_name":   "localhost",
+		"csr":           csrPem,
+		"serial_number": "foobar2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBackend_URLsCRUD(t *testing.T) {
 	t.Parallel()
 	initTest.Do(setCerts)
@@ -510,14 +592,14 @@ func generateURLSteps(t *testing.T, caCert, caKey string, intdata, reqdata map[s
 		},
 	}
 
-	priv1024, _ := rsa.GenerateKey(rand.Reader, 1024)
+	priv1024, _ := cryptoutil.GenerateRSAKey(rand.Reader, 1024)
 	csr1024, _ := x509.CreateCertificateRequest(rand.Reader, &csrTemplate, priv1024)
 	csrPem1024 := strings.TrimSpace(string(pem.EncodeToMemory(&pem.Block{
 		Type:  "CERTIFICATE REQUEST",
 		Bytes: csr1024,
 	})))
 
-	priv2048, _ := rsa.GenerateKey(rand.Reader, 2048)
+	priv2048, _ := cryptoutil.GenerateRSAKey(rand.Reader, 2048)
 	csr2048, _ := x509.CreateCertificateRequest(rand.Reader, &csrTemplate, priv2048)
 	csrPem2048 := strings.TrimSpace(string(pem.EncodeToMemory(&pem.Block{
 		Type:  "CERTIFICATE REQUEST",
@@ -699,7 +781,7 @@ func generateCSR(t *testing.T, csrTemplate *x509.CertificateRequest, keyType str
 	var err error
 	switch keyType {
 	case "rsa":
-		priv, err = rsa.GenerateKey(rand.Reader, keyBits)
+		priv, err = cryptoutil.GenerateRSAKey(rand.Reader, keyBits)
 	case "ec":
 		switch keyBits {
 		case 224:
@@ -1180,7 +1262,7 @@ func generateRoleSteps(t *testing.T, useCSRs bool) []logicaltest.TestStep {
 		case "rsa":
 			privKey, ok = generatedRSAKeys[keyBits]
 			if !ok {
-				privKey, _ = rsa.GenerateKey(rand.Reader, keyBits)
+				privKey, _ = cryptoutil.GenerateRSAKey(rand.Reader, keyBits)
 				generatedRSAKeys[keyBits] = privKey
 			}
 
@@ -2164,7 +2246,7 @@ func runTestSignVerbatim(t *testing.T, keyType string) {
 	}
 
 	// create a CSR and key
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := cryptoutil.GenerateRSAKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2735,7 +2817,7 @@ func TestBackend_SignSelfIssued(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := cryptoutil.GenerateRSAKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2879,7 +2961,7 @@ func TestBackend_SignSelfIssued_DifferentTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := cryptoutil.GenerateRSAKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3721,6 +3803,7 @@ func TestReadWriteDeleteRoles(t *testing.T) {
 	expectedData := map[string]interface{}{
 		"key_type":                           "rsa",
 		"use_csr_sans":                       true,
+		"serial_number_source":               "json-csr",
 		"client_flag":                        true,
 		"allowed_serial_numbers":             []interface{}{},
 		"generate_lease":                     false,
@@ -3834,7 +3917,7 @@ func setCerts() {
 	}
 	ecCACert = strings.TrimSpace(string(pem.EncodeToMemory(caCertPEMBlock)))
 
-	rak, err := rsa.GenerateKey(rand.Reader, 2048)
+	rak, err := cryptoutil.GenerateRSAKey(rand.Reader, 2048)
 	if err != nil {
 		panic(err)
 	}
@@ -6103,6 +6186,7 @@ func TestPKI_EmptyCRLConfigUpgraded(t *testing.T) {
 	require.Equal(t, resp.Data["auto_rebuild_grace_period"], pki_backend.DefaultCrlConfig.AutoRebuildGracePeriod)
 	require.Equal(t, resp.Data["enable_delta"], pki_backend.DefaultCrlConfig.EnableDelta)
 	require.Equal(t, resp.Data["delta_rebuild_interval"], pki_backend.DefaultCrlConfig.DeltaRebuildInterval)
+	require.Equal(t, resp.Data["max_crl_entries"], pki_backend.DefaultCrlConfig.MaxCRLEntries)
 }
 
 func TestPKI_ListRevokedCerts(t *testing.T) {
@@ -6829,6 +6913,7 @@ func TestProperAuthing(t *testing.T) {
 	}
 	serial := resp.Data["serial_number"].(string)
 	eabKid := "13b80844-e60d-42d2-b7e9-152a8e834b90"
+	acmeKeyId := "hrKmDYTvicHoHGVN2-3uzZV_BPGdE0W_dNaqYTtYqeo="
 	paths := map[string]pathAuthChecker{
 		"ca_chain":                               shouldBeUnauthedReadList,
 		"cert/ca_chain":                          shouldBeUnauthedReadList,
@@ -6948,6 +7033,8 @@ func TestProperAuthing(t *testing.T) {
 		"unified-ocsp/dGVzdAo=":                  shouldBeUnauthedReadList,
 		"eab/":                                   shouldBeAuthed,
 		"eab/" + eabKid:                          shouldBeAuthed,
+		"acme/mgmt/account/keyid/":               shouldBeAuthed,
+		"acme/mgmt/account/keyid/" + acmeKeyId:   shouldBeAuthed,
 	}
 
 	entPaths := getEntProperAuthingPaths(serial)
@@ -7018,7 +7105,10 @@ func TestProperAuthing(t *testing.T) {
 			raw_path = strings.ReplaceAll(raw_path, "{serial}", serial)
 		}
 		if strings.Contains(raw_path, "acme/account/") && strings.Contains(raw_path, "{kid}") {
-			raw_path = strings.ReplaceAll(raw_path, "{kid}", "hrKmDYTvicHoHGVN2-3uzZV_BPGdE0W_dNaqYTtYqeo=")
+			raw_path = strings.ReplaceAll(raw_path, "{kid}", acmeKeyId)
+		}
+		if strings.Contains(raw_path, "acme/mgmt/account/") && strings.Contains(raw_path, "{keyid}") {
+			raw_path = strings.ReplaceAll(raw_path, "{keyid}", acmeKeyId)
 		}
 		if strings.Contains(raw_path, "acme/") && strings.Contains(raw_path, "{auth_id}") {
 			raw_path = strings.ReplaceAll(raw_path, "{auth_id}", "29da8c38-7a09-465e-b9a6-3d76802b1afd")
@@ -7080,15 +7170,16 @@ func TestProperAuthing(t *testing.T) {
 	}
 }
 
+type patchIssuerTestCase struct {
+	Field   string
+	Before  interface{}
+	Patched interface{}
+}
+
 func TestPatchIssuer(t *testing.T) {
 	t.Parallel()
 
-	type TestCase struct {
-		Field   string
-		Before  interface{}
-		Patched interface{}
-	}
-	testCases := []TestCase{
+	testCases := []patchIssuerTestCase{
 		{
 			Field:   "issuer_name",
 			Before:  "root",
@@ -7135,65 +7226,82 @@ func TestPatchIssuer(t *testing.T) {
 			Patched: []string{"self"},
 		},
 	}
+	testPatchIssuer(t, testCases)
+}
 
-	for index, testCase := range testCases {
-		t.Logf("index: %v / tc: %v", index, testCase)
+func testPatchIssuer(t *testing.T, testCases []patchIssuerTestCase) {
+	for _, testCase := range testCases {
+		t.Run(testCase.Field, func(t *testing.T) {
+			b, s := CreateBackendWithStorage(t)
 
-		b, s := CreateBackendWithStorage(t)
+			// 1. Setup root issuer.
+			resp, err := CBWrite(b, s, "root/generate/internal", map[string]interface{}{
+				"common_name": "Vault Root CA",
+				"key_type":    "ec",
+				"ttl":         "7200h",
+				"issuer_name": "root",
+			})
+			requireSuccessNonNilResponse(t, resp, err, "failed generating root issuer")
+			id := string(resp.Data["issuer_id"].(issuing.IssuerID))
 
-		// 1. Setup root issuer.
-		resp, err := CBWrite(b, s, "root/generate/internal", map[string]interface{}{
-			"common_name": "Vault Root CA",
-			"key_type":    "ec",
-			"ttl":         "7200h",
-			"issuer_name": "root",
+			// 2. Enable Cluster paths
+			resp, err = CBWrite(b, s, "config/urls", map[string]interface{}{
+				"path":     "https://localhost/v1/pki",
+				"aia_path": "http://localhost/v1/pki",
+			})
+			requireSuccessNonNilResponse(t, resp, err, "failed updating AIA config")
+
+			// 3. Add AIA information
+			resp, err = CBPatch(b, s, "issuer/default", map[string]interface{}{
+				"issuing_certificates":    "http://localhost/v1/pki-1/ca",
+				"crl_distribution_points": "http://localhost/v1/pki-1/crl",
+				"ocsp_servers":            "http://localhost/v1/pki-1/ocsp",
+			})
+			requireSuccessNonNilResponse(t, resp, err, "failed setting up issuer")
+
+			// 4. Read the issuer before.
+			resp, err = CBRead(b, s, "issuer/default")
+			requireSuccessNonNilResponse(t, resp, err, "failed reading root issuer before")
+			require.Equal(t, testCase.Before, resp.Data[testCase.Field], "bad expectations")
+
+			// 5. Perform modification.
+			resp, err = CBPatch(b, s, "issuer/default", map[string]interface{}{
+				testCase.Field: testCase.Patched,
+			})
+			requireSuccessNonNilResponse(t, resp, err, "failed patching root issuer")
+
+			if testCase.Field != "manual_chain" {
+				require.Equal(t, testCase.Patched, resp.Data[testCase.Field], "failed persisting value")
+			} else {
+				// self->id
+				require.Equal(t, []string{id}, resp.Data[testCase.Field], "failed persisting value")
+			}
+
+			// 6. Ensure it stuck
+			resp, err = CBRead(b, s, "issuer/default")
+			requireSuccessNonNilResponse(t, resp, err, "failed reading root issuer after")
+
+			if testCase.Field != "manual_chain" {
+				require.Equal(t, testCase.Patched, resp.Data[testCase.Field])
+			} else {
+				// self->id
+				require.Equal(t, []string{id}, resp.Data[testCase.Field], "failed persisting value")
+			}
+
+			// 7. Patch it back
+			resp, err = CBPatch(b, s, "issuer/default", map[string]interface{}{
+				testCase.Field: testCase.Before,
+			})
+			requireSuccessNonNilResponse(t, resp, err, "failed patching root issuer")
+
+			require.Equal(t, testCase.Before, resp.Data[testCase.Field], "failed persisting value")
+
+			// 8. Ensure it stuck
+			resp, err = CBRead(b, s, "issuer/default")
+			requireSuccessNonNilResponse(t, resp, err, "failed reading root issuer after")
+
+			require.Equal(t, testCase.Before, resp.Data[testCase.Field])
 		})
-		requireSuccessNonNilResponse(t, resp, err, "failed generating root issuer")
-		id := string(resp.Data["issuer_id"].(issuing.IssuerID))
-
-		// 2. Enable Cluster paths
-		resp, err = CBWrite(b, s, "config/urls", map[string]interface{}{
-			"path":     "https://localhost/v1/pki",
-			"aia_path": "http://localhost/v1/pki",
-		})
-		requireSuccessNonNilResponse(t, resp, err, "failed updating AIA config")
-
-		// 3. Add AIA information
-		resp, err = CBPatch(b, s, "issuer/default", map[string]interface{}{
-			"issuing_certificates":    "http://localhost/v1/pki-1/ca",
-			"crl_distribution_points": "http://localhost/v1/pki-1/crl",
-			"ocsp_servers":            "http://localhost/v1/pki-1/ocsp",
-		})
-		requireSuccessNonNilResponse(t, resp, err, "failed setting up issuer")
-
-		// 4. Read the issuer before.
-		resp, err = CBRead(b, s, "issuer/default")
-		requireSuccessNonNilResponse(t, resp, err, "failed reading root issuer before")
-		require.Equal(t, testCase.Before, resp.Data[testCase.Field], "bad expectations")
-
-		// 5. Perform modification.
-		resp, err = CBPatch(b, s, "issuer/default", map[string]interface{}{
-			testCase.Field: testCase.Patched,
-		})
-		requireSuccessNonNilResponse(t, resp, err, "failed patching root issuer")
-
-		if testCase.Field != "manual_chain" {
-			require.Equal(t, testCase.Patched, resp.Data[testCase.Field], "failed persisting value")
-		} else {
-			// self->id
-			require.Equal(t, []string{id}, resp.Data[testCase.Field], "failed persisting value")
-		}
-
-		// 6. Ensure it stuck
-		resp, err = CBRead(b, s, "issuer/default")
-		requireSuccessNonNilResponse(t, resp, err, "failed reading root issuer after")
-
-		if testCase.Field != "manual_chain" {
-			require.Equal(t, testCase.Patched, resp.Data[testCase.Field])
-		} else {
-			// self->id
-			require.Equal(t, []string{id}, resp.Data[testCase.Field], "failed persisting value")
-		}
 	}
 }
 

@@ -10,7 +10,12 @@ import { assert } from '@ember/debug';
 import { action } from '@ember/object';
 import { guidFor } from '@ember/object/internals';
 import KVObject from 'vault/lib/kv-object';
-import { hasWhitespace, isNonString, NON_STRING_WARNING, WHITESPACE_WARNING } from 'vault/utils/validators';
+import {
+  hasWhitespace,
+  isNonString,
+  NON_STRING_WARNING,
+  WHITESPACE_WARNING,
+} from 'vault/utils/model-helpers/validators';
 
 /**
  * @module KvObjectEditor
@@ -21,7 +26,7 @@ import { hasWhitespace, isNonString, NON_STRING_WARNING, WHITESPACE_WARNING } fr
  *
  * @param {string} value - the value is captured from the model.
  * @param {function} onChange - function that captures the value on change
- * @param {boolean} [isMasked = false] - when true the `<MaskedInput>` renders instead of the default `<textarea>` to input the value portion of the key/value object
+ * @param {boolean} [isMasked = false] - when true the `MaskedInput` renders instead of the default `textarea` to input the value portion of the key/value object
  * @param {boolean} [isSingleRow = false] - when true the kv object editor will only show one row and hide the Add button
  * @param {function} [onKeyUp] - function passed in that handles the dom keyup event. Used for validation on the kv custom metadata.
  * @param {string} [label] - label displayed over key value inputs

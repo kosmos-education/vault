@@ -24,7 +24,7 @@ module('Integration | Component | replication page/mode-index', function (hooks)
   hooks.beforeEach(function () {
     this.store = this.owner.lookup('service:store');
     this.onEnable = () => {};
-    this.clusterModel = {};
+    this.clusterModel = { replicationAttrs: {} };
     this.replicationMode = '';
     this.replicationDisabled = true;
 

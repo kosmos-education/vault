@@ -45,7 +45,7 @@ func (c *Core) IdentityStore() *IdentityStore {
 	return c.identityStore
 }
 
-func (i *IdentityStore) resetDB(ctx context.Context) error {
+func (i *IdentityStore) resetDB() error {
 	var err error
 
 	i.db, err = memdb.NewMemDB(identityStoreSchema(!i.disableLowerCasedNames))
@@ -58,25 +58,26 @@ func (i *IdentityStore) resetDB(ctx context.Context) error {
 
 func NewIdentityStore(ctx context.Context, core *Core, config *logical.BackendConfig, logger log.Logger) (*IdentityStore, error) {
 	iStore := &IdentityStore{
-		view:          config.StorageView,
-		logger:        logger,
-		router:        core.router,
-		redirectAddr:  core.redirectAddr,
-		localNode:     core,
-		namespacer:    core,
-		metrics:       core.MetricSink(),
-		totpPersister: core,
-		groupUpdater:  core,
-		tokenStorer:   core,
-		entityCreator: core,
-		mountLister:   core,
-		mfaBackend:    core.loginMFABackend,
-		aliasLocks:    locksutil.CreateLocks(),
+		view:                   config.StorageView,
+		logger:                 logger,
+		router:                 core.router,
+		redirectAddr:           core.redirectAddr,
+		localNode:              core,
+		namespacer:             core,
+		metrics:                core.MetricSink(),
+		totpPersister:          core,
+		tokenStorer:            core,
+		entityCreator:          core,
+		mountLister:            core,
+		mfaBackend:             core.loginMFABackend,
+		aliasLocks:             locksutil.CreateLocks(),
+		renameDuplicates:       core.FeatureActivationFlags,
+		activationErrorHandler: core,
 	}
 
 	// Create a memdb instance, which by default, operates on lower cased
 	// identity names
-	err := iStore.resetDB(ctx)
+	err := iStore.resetDB()
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +109,7 @@ func NewIdentityStore(ctx context.Context, core *Core, config *logical.BackendCo
 		Paths:          iStore.paths(),
 		Invalidate:     iStore.Invalidate,
 		InitializeFunc: iStore.initialize,
+		ActivationFunc: iStore.activateDeduplication,
 		PathsSpecial: &logical.Paths{
 			Unauthenticated: []string{
 				"oidc/.well-known/*",

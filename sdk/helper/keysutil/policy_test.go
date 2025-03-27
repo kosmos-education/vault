@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	mathrand "math/rand"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/vault/sdk/helper/cryptoutil"
 	"github.com/hashicorp/vault/sdk/helper/errutil"
 	"github.com/hashicorp/vault/sdk/helper/jsonutil"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -33,7 +35,8 @@ import (
 var allTestKeyTypes = []KeyType{
 	KeyType_AES256_GCM96, KeyType_ECDSA_P256, KeyType_ED25519, KeyType_RSA2048,
 	KeyType_RSA4096, KeyType_ChaCha20_Poly1305, KeyType_ECDSA_P384, KeyType_ECDSA_P521, KeyType_AES128_GCM96,
-	KeyType_RSA3072, KeyType_MANAGED_KEY, KeyType_HMAC, KeyType_AES128_CMAC, KeyType_AES256_CMAC,
+	KeyType_RSA3072, KeyType_MANAGED_KEY, KeyType_HMAC, KeyType_AES128_CMAC, KeyType_AES256_CMAC, KeyType_ML_DSA,
+	KeyType_HYBRID,
 }
 
 func TestPolicy_KeyTypes(t *testing.T) {
@@ -52,7 +55,7 @@ func TestPolicy_KeyTypes(t *testing.T) {
 	}
 }
 
-func TestPolicy_HmacCmacSuported(t *testing.T) {
+func TestPolicy_HmacCmacSupported(t *testing.T) {
 	// Test HMAC supported feature
 	for _, keyType := range allTestKeyTypes {
 		switch keyType {
@@ -809,7 +812,7 @@ func Test_Import(t *testing.T) {
 func generateTestKeys() (map[KeyType][]byte, error) {
 	keyMap := make(map[KeyType][]byte)
 
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	rsaKey, err := cryptoutil.GenerateRSAKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, err
 	}
@@ -819,7 +822,7 @@ func generateTestKeys() (map[KeyType][]byte, error) {
 	}
 	keyMap[KeyType_RSA2048] = rsaKeyBytes
 
-	rsaKey, err = rsa.GenerateKey(rand.Reader, 3072)
+	rsaKey, err = cryptoutil.GenerateRSAKey(rand.Reader, 3072)
 	if err != nil {
 		return nil, err
 	}
@@ -829,7 +832,7 @@ func generateTestKeys() (map[KeyType][]byte, error) {
 	}
 	keyMap[KeyType_RSA3072] = rsaKeyBytes
 
-	rsaKey, err = rsa.GenerateKey(rand.Reader, 4096)
+	rsaKey, err = cryptoutil.GenerateRSAKey(rand.Reader, 4096)
 	if err != nil {
 		return nil, err
 	}
@@ -930,6 +933,25 @@ func autoVerify(depth int, t *testing.T, p *Policy, input []byte, sig *SigningRe
 	}
 	if !verified {
 		t.Fatal(tabs, "❌ Failed to automatically verify signature")
+	}
+}
+
+func autoVerifyDecrypt(depth int, t *testing.T, p *Policy, input []byte, ct string, factories ...any) {
+	tabs := strings.Repeat("\t", depth)
+	t.Log(tabs, "Automatically decrypting with options:", factories)
+
+	tabs = strings.Repeat("\t", depth+1)
+	ptb64, err := p.DecryptWithFactory(nil, nil, ct, factories...)
+	if err != nil {
+		t.Fatal(tabs, "❌ Failed to automatically verify signature:", err)
+	}
+
+	pt, err := base64.StdEncoding.DecodeString(ptb64)
+	if err != nil {
+		t.Fatal(tabs, "❌ Failed decoding plaintext:", err)
+	}
+	if !bytes.Equal(input, pt) {
+		t.Fatal(tabs, "❌ Failed to automatically decrypt")
 	}
 }
 
@@ -1083,8 +1105,64 @@ func Test_RSA_PSS(t *testing.T) {
 	}
 }
 
-func Test_RSA_PKCS1(t *testing.T) {
-	t.Log("Testing RSA PKCS#1v1.5")
+func Test_RSA_PKCS1Encryption(t *testing.T) {
+	t.Log("Testing RSA PKCS#1v1.5 padded encryption")
+
+	ctx := context.Background()
+	storage := &logical.InmemStorage{}
+	// https://crypto.stackexchange.com/a/1222
+	pt := []byte("Sphinx of black quartz, judge my vow")
+	input := base64.StdEncoding.EncodeToString(pt)
+
+	tabs := make(map[int]string)
+	for i := 1; i <= 6; i++ {
+		tabs[i] = strings.Repeat("\t", i)
+	}
+
+	test_RSA_PKCS1 := func(t *testing.T, p *Policy, rsaKey *rsa.PrivateKey, padding PaddingScheme) {
+		// 1. Make a signature with the given key size and hash algorithm.
+		t.Log(tabs[3], "Make an automatic signature")
+		ct, err := p.EncryptWithFactory(0, nil, nil, string(input), padding)
+		if err != nil {
+			t.Fatal(tabs[4], "❌ Failed to automatically encrypt:", err)
+		}
+
+		// 1.1 Verify this signature using the *inferred* salt length.
+		autoVerifyDecrypt(4, t, p, pt, ct, padding)
+	}
+
+	rsaKeyTypes := []KeyType{KeyType_RSA2048, KeyType_RSA3072, KeyType_RSA4096}
+	testKeys, err := generateTestKeys()
+	if err != nil {
+		t.Fatalf("error generating test keys: %s", err)
+	}
+
+	// 1. For each standard RSA key size 2048, 3072, and 4096...
+	for _, rsaKeyType := range rsaKeyTypes {
+		t.Log("Key size: ", rsaKeyType)
+		p := &Policy{
+			Name: fmt.Sprint(rsaKeyType), // NOTE: crucial to create a new key per key size
+			Type: rsaKeyType,
+		}
+
+		rsaKeyBytes := testKeys[rsaKeyType]
+		err := p.Import(ctx, storage, rsaKeyBytes, rand.Reader)
+		if err != nil {
+			t.Fatal(tabs[1], "❌ Failed to import key:", err)
+		}
+		rsaKeyAny, err := x509.ParsePKCS8PrivateKey(rsaKeyBytes)
+		if err != nil {
+			t.Fatalf("error parsing test keys: %s", err)
+		}
+		rsaKey := rsaKeyAny.(*rsa.PrivateKey)
+		for _, padding := range []PaddingScheme{PaddingScheme_OAEP, PaddingScheme_PKCS1v15, ""} {
+			t.Run(fmt.Sprintf("%s/%s", rsaKeyType.String(), padding), func(t *testing.T) { test_RSA_PKCS1(t, p, rsaKey, padding) })
+		}
+	}
+}
+
+func Test_RSA_PKCS1Signing(t *testing.T) {
+	t.Log("Testing RSA PKCS#1v1.5 signatures")
 
 	ctx := context.Background()
 	storage := &logical.InmemStorage{}

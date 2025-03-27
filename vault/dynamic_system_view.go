@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/vault/sdk/helper/pluginutil"
 	"github.com/hashicorp/vault/sdk/helper/wrapping"
 	"github.com/hashicorp/vault/sdk/logical"
+	"github.com/hashicorp/vault/sdk/rotation"
 	"github.com/hashicorp/vault/vault/plugincatalog"
 	"github.com/hashicorp/vault/version"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -352,4 +353,35 @@ func (d dynamicSystemView) GenerateIdentityToken(ctx context.Context, req *plugi
 		Token: pluginutil.IdentityToken(token),
 		TTL:   ttl,
 	}, nil
+}
+
+func (d dynamicSystemView) RegisterRotationJob(ctx context.Context, req *rotation.RotationJobConfigureRequest) (string, error) {
+	mountEntry := d.mountEntry
+	if mountEntry == nil {
+		return "", fmt.Errorf("no mount entry")
+	}
+	nsCtx := namespace.ContextWithNamespace(ctx, mountEntry.Namespace())
+
+	job, err := rotation.ConfigureRotationJob(req)
+	if err != nil {
+		return "", fmt.Errorf("error configuring rotation job: %s", err)
+	}
+
+	id, err := d.core.RegisterRotationJob(nsCtx, job)
+	if err != nil {
+		return "", fmt.Errorf("error registering rotation job: %s", err)
+	}
+
+	job.RotationID = id
+	return id, nil
+}
+
+func (d dynamicSystemView) DeregisterRotationJob(ctx context.Context, req *rotation.RotationJobDeregisterRequest) (err error) {
+	mountEntry := d.mountEntry
+	if mountEntry == nil {
+		return fmt.Errorf("no mount entry")
+	}
+	nsCtx := namespace.ContextWithNamespace(ctx, mountEntry.Namespace())
+
+	return d.core.DeregisterRotationJob(nsCtx, req)
 }
