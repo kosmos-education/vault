@@ -200,8 +200,3 @@ label {
 .hds-text.code-in-text {
   background-color: var(--token-color-surface-strong);
 }
-
-// <Hds::Text::Code> this applies to code elements that are placed within a surrounding text - not for standalone use
-.hds-text.code-in-text {
-  background-color: var(--token-color-surface-strong);
-}
