@@ -29,6 +29,8 @@ replace github.com/hashicorp/vault/sdk => ./sdk
 // See https://github.com/99designs/keyring/issues/103 and https://github.com/snowflakedb/gosnowflake/issues/1183
 replace github.com/99designs/keyring => github.com/Jeffail/keyring v1.2.3
 
+replace github.com/hashicorp/vault-plugin-secrets-kv => ./plugins/vault-plugin-secrets-kv
+
 require (
 	cloud.google.com/go/cloudsqlconn v1.4.3
 	cloud.google.com/go/monitoring v1.24.2
