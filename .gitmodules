@@ -1,0 +1,3 @@
+[submodule "plugins/vault-plugin-secrets-kv"]
+	path = plugins/vault-plugin-secrets-kv
+	url = https://github.com/kosmos-education/vault-plugin-secrets-kv.git
