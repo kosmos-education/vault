@@ -6,20 +6,33 @@
 import { test, expect } from '@playwright/test';
 
 test('namespace workflow', async ({ page }) => {
-  await page.goto('dashboard');
-  // nav to namespaces and create a new namespace
-  await page.getByRole('link', { name: 'Access control' }).click();
-  await page.getByRole('link', { name: 'Namespaces' }).click();
-  await page.getByRole('link', { name: 'Create namespace' }).click();
-  await page.getByRole('textbox', { name: 'Path' }).fill('testNamespace');
-  await page.getByRole('button', { name: 'Save' }).click();
+  await test.step('create namespace', async () => {
+    await page.goto('dashboard');
+    await page.getByRole('link', { name: 'Access control' }).click();
+    await page.getByRole('link', { name: 'Namespaces' }).click();
+    await page.getByRole('link', { name: 'Create namespace' }).click();
+    await page.getByRole('textbox', { name: 'Path' }).fill('testNamespace');
+    await page.getByRole('button', { name: 'Save' }).click();
+  });
 
-  // click on the namespace picker in the top navbar and switch to the new namespace
-  await page.getByRole('button', { name: 'root' }).click();
-  await page.getByRole('option', { name: 'testNamespace' }).click();
+  await test.step('should display the new namespace in the namespace picker and switch to it', async () => {
+    await page.getByRole('button', { name: 'root' }).click();
+    await page.getByRole('option', { name: 'testNamespace' }).click();
+  });
 
-  // verify that we are switched into the new namespace by checking for the namespace name in the header
-  await expect(page.locator('#app-main-content').getByText('testNamespace')).toBeVisible();
+  await test.step('should switch to the new namespace and display the correct header', async () => {
+    await expect(page.locator('#app-main-content').getByText('testNamespace')).toBeVisible();
+  });
+
+  await test.step('delete namespace', async () => {
+    await page.getByRole('button', { name: 'testNamespace' }).click();
+    await page.getByRole('option', { name: 'root' }).click();
+    await page.getByRole('link', { name: 'Access control' }).click();
+    await page.getByRole('link', { name: 'Namespaces' }).click();
+    await page.getByRole('button', { name: 'More options' }).click();
+    await page.getByRole('button', { name: 'Delete' }).click();
+    await page.getByRole('button', { name: 'Confirm' }).click();
+  });
 });
 
 test('namespace wizard workflow', async ({ page }) => {
