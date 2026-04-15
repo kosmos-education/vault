@@ -22,6 +22,8 @@ replace github.com/hashicorp/vault/api/auth/userpass => ./api/auth/userpass
 
 replace github.com/hashicorp/vault/sdk => ./sdk
 
+replace github.com/hashicorp/vault-plugin-secrets-kv => ./plugins/vault-plugin-secrets-kv
+
 // The keyring library has an outstanding bug that causes zombie dbus-daemon
 // processes on each execution. Vault has an indirect dependency on keyring via
 // gosnowflake. This replace is a stopgap measure until either gosnowflake or
