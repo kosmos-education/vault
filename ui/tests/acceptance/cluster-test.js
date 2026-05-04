@@ -120,4 +120,13 @@ module('Acceptance | cluster', function (hooks) {
       'Navigating to /secrets redirects to /secrets-engines'
     );
   });
+
+  test('redirects to secret-engines from legacy /secrets sub-path', async function (assert) {
+    await visit('/vault/secrets/cubbyhole/list');
+    assert.strictEqual(
+      currentURL(),
+      '/vault/secrets-engines/cubbyhole/list',
+      'Navigating to /secrets/<sub-path> redirects to /secrets-engines/<sub-path>'
+    );
+  });
 });
