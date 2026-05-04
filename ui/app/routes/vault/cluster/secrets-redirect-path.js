@@ -11,6 +11,6 @@ export default class SecretsRedirectPathRoute extends Route {
   beforeModel(transition) {
     const { path } = transition.to.params;
     const { cluster_name } = this.paramsFor('vault.cluster');
-    this.router.replaceWith(`/vault/${cluster_name}/secrets-engines/${path}`);
+    this.router.replaceWith(`/${cluster_name}/secrets-engines/${path}`);
   }
 }
