@@ -7,7 +7,7 @@
 
 <Hds::Form {{on "submit" (perform this.save)}} data-test-policy-form class="has-bottom-margin-xs" as |FORM|>
   <FORM.Section @isFullWidth={{true}}>
-    <MessageError @errorMessage={{this.errorBanner}} />
+    <MessageError @errorMessage={{this.errorBanner}} @errorDetails={{this.errorDetails}} />
   </FORM.Section>
 
   {{#if @model.isNew}}
@@ -35,6 +35,7 @@
         <Hds::Form::TextInput::Field
           name="name"
           @value={{lowercase @model.name}}
+          @isRequired={{true}}
           placeholder="Enter the policy name"
           autocomplete="off"
           spellcheck="false"
@@ -87,6 +88,7 @@
           @policyName={{@model.name}}
           @onPolicyChange={{this.handlePolicyChange}}
           @stanzas={{this.stanzas}}
+          @renderValidations={{if (this.validationError "stanzas") true false}}
           data-test-field="visual editor"
         />
       {{else}}

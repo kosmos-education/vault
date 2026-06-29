@@ -225,6 +225,7 @@ func (b *backend) pathPolicyWrite(ctx context.Context, req *logical.Request, d *
 		Exportable:           exportable,
 		AllowPlaintextBackup: allowPlaintextBackup,
 		AutoRotatePeriod:     autoRotatePeriod,
+		WriteLocked:          true,
 	}
 
 	switch keyType {
@@ -336,9 +337,6 @@ func (b *backend) pathPolicyWrite(ctx context.Context, req *logical.Request, d *
 	if p == nil {
 		return nil, fmt.Errorf("error generating key: returned policy was nil")
 	}
-	if !b.System().CachingDisabled() {
-		p.Lock(true)
-	}
 	defer p.Unlock()
 
 	resp, err := b.formatKeyPolicy(p, nil)
@@ -378,9 +376,6 @@ func (b *backend) pathPolicyRead(ctx context.Context, req *logical.Request, d *f
 	}
 	if p == nil {
 		return nil, nil
-	}
-	if !b.System().CachingDisabled() {
-		p.Lock(false)
 	}
 	defer p.Unlock()
 
@@ -516,8 +511,13 @@ func (b *backend) formatKeyPolicy(p *keysutil.Policy, context []byte) (*logical.
 		retKeys := map[string]map[string]interface{}{}
 		for k, v := range p.Keys {
 			key := asymKey{
-				PublicKey:    v.FormattedPublicKey,
 				CreationTime: v.CreationTime,
+			}
+			switch p.Type {
+			case keysutil.KeyType_HYBRID, keysutil.KeyType_ML_DSA, keysutil.KeyType_SLH_DSA:
+				key.HybridPublicKey = getFormattedPQCPublicKey(p.Type, v)
+			default:
+				key.PublicKey = v.FormattedPublicKey
 			}
 			if key.CreationTime.IsZero() {
 				key.CreationTime = time.Unix(v.DeprecatedCreationTime, 0)
@@ -577,6 +577,8 @@ func (b *backend) formatKeyPolicy(p *keysutil.Policy, context []byte) (*logical.
 				key.PublicKey = pubKey
 			case keysutil.KeyType_ML_DSA:
 				key.Name = "ml-dsa-" + p.ParameterSet
+			case keysutil.KeyType_SLH_DSA:
+				key.Name = "slh-dsa" + p.ParameterSet
 			}
 
 			retKeys[k] = structs.New(key).Map()

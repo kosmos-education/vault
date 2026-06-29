@@ -24,7 +24,7 @@ import type AuthService from 'vault/services/auth';
 import type NamespaceService from 'vault/services/namespace';
 import type ControlGroupService from 'vault/services/control-group';
 import type FlashMessageService from 'vault/services/flash-messages';
-import type { HeaderMap, XVaultHeaders } from 'vault/api';
+import type { HeaderMap, ApiErrorResponse, ApiParsedError, XVaultHeaders } from 'vault/api';
 import type { HTTPMethod } from '@hashicorp/vault-client-typescript';
 
 export default class ApiService extends Service {
@@ -85,17 +85,27 @@ export default class ApiService extends Service {
   };
 
   // -- Post Request Middleware --
+  private async readJson(response: Response) {
+    const contentType = response.headers.get('Content-Type');
+    if (!contentType?.includes('json')) {
+      return null;
+    }
+
+    try {
+      return await response.json();
+    } catch {
+      return null;
+    }
+  }
+
   showWarnings = waitFor(async (context: ResponseContext) => {
     const response = context.response.clone();
-    // if the response is empty, don't try to parse it
-    if (response.headers.get('Content-Length')) {
-      const json = await response.json();
+    const json = await this.readJson(response);
 
-      if (json?.warnings) {
-        json.warnings.forEach((message: string) => {
-          this.flashMessages.info(message);
-        });
-      }
+    if (json?.warnings) {
+      json.warnings.forEach((message: string) => {
+        this.flashMessages.info(message);
+      });
     }
   });
 
@@ -114,19 +124,17 @@ export default class ApiService extends Service {
       }
     }
     // if the requested path is locked by a control group we need to create a new error response
-    if (headers.get('Content-Length')) {
-      const json = await response.json();
-      const wrapTtl = headers.get('X-Vault-Wrap-TTL');
-      const isLockedByControlGroup = this.controlGroup.isRequestedPathLocked(json, wrapTtl);
+    const json = await this.readJson(response);
+    const wrapTtl = headers.get('X-Vault-Wrap-TTL');
+    const isLockedByControlGroup = this.controlGroup.isRequestedPathLocked(json, wrapTtl);
 
-      if (isLockedByControlGroup) {
-        const error = {
-          message: 'Control Group encountered',
-          isControlGroupError: true,
-          ...json.wrap_info,
-        };
-        return new Response(JSON.stringify(error), { headers, status: 403, statusText: 'Forbidden' });
-      }
+    if (isLockedByControlGroup && json) {
+      const error = {
+        message: 'Control Group encountered',
+        isControlGroupError: true,
+        ...json.wrap_info,
+      };
+      return new Response(JSON.stringify(error), { headers, status: 403, statusText: 'Forbidden' });
     }
 
     return;
@@ -188,35 +196,37 @@ export default class ApiService extends Service {
   // accepts an error response and returns { status, message, response, path }
   // message is built as error.errors joined with a comma, error.message or a fallback message
   // path is the url of the request, minus the origin -> /v1/sys/wrapping/unwrap
-  parseError = waitFor(async (e: unknown, fallbackMessage = 'An error occurred, please try again') => {
-    if (e instanceof ResponseError) {
-      const { status, url } = e.response;
-      // instances where an error is thrown multiple times could result in the body already being read
-      // this will result in a readable stream failure and we can't parse the body
-      // to avoid this, clone the response so we can access the body consistently
-      const error = await e.response.clone().json();
-      // typically the Vault API error response looks like { errors: ['some error message'] }
-      // but sometimes (eg RespondWithStatusCode) it's { data: { error: 'some error message' } }
-      const errors = error.data?.error && !error.errors ? [error.data.error] : error.errors;
-      const message = errors && typeof errors[0] === 'string' ? errors.join(', ') : error.message;
+  parseError = waitFor(
+    async (e: unknown, fallbackMessage = 'An error occurred, please try again'): Promise<ApiParsedError> => {
+      if (e instanceof ResponseError) {
+        const { status, url } = e.response;
+        // instances where an error is thrown multiple times could result in the body already being read
+        // this will result in a readable stream failure and we can't parse the body
+        // to avoid this, clone the response so we can access the body consistently
+        const error = (await e.response.clone().json()) as ApiErrorResponse;
+        // typically the Vault API error response looks like { errors: ['some error message'] }
+        // but sometimes (eg RespondWithStatusCode) it's { data: { error: 'some error message' } }
+        const errors = error.data?.error && !error.errors ? [error.data.error] : error.errors;
+        const message = errors && typeof errors[0] === 'string' ? errors.join(', ') : error.message;
+
+        return {
+          message: message || fallbackMessage,
+          status,
+          path: decodeURIComponent(url.replace(document.location.origin, '')),
+          response: error,
+        };
+      }
+
+      // log out generic error for ease of debugging in dev env
+      if (config.environment === 'development') {
+        console.error('API Error:', e);
+      }
 
       return {
-        message: message || fallbackMessage,
-        status,
-        path: decodeURIComponent(url.replace(document.location.origin, '')),
-        response: error,
+        message: (e as Error)?.message || fallbackMessage,
       };
     }
-
-    // log out generic error for ease of debugging in dev env
-    if (config.environment === 'development') {
-      console.error('API Error:', e);
-    }
-
-    return {
-      message: (e as Error)?.message || fallbackMessage,
-    };
-  });
+  );
 
   // accepts a list response as { key_info, keys } and returns a flat array of the key_info datum
   // to preserve the keys (unique identifiers) the value will be set on the datum as the provided uuidKey or id

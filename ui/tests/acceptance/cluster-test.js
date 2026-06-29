@@ -10,7 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { login, loginMethod, logout } from 'vault/tests/helpers/auth/auth-helpers';
 import { mountBackend } from 'vault/tests/helpers/components/mount-backend-form-helpers';
-import { runCmd } from 'vault/tests/helpers/commands';
+import { mountEngineCmd, runCmd, deleteEngineCmd } from 'vault/tests/helpers/commands';
 import { GENERAL } from 'vault/tests/helpers/general-selectors';
 
 const tokenWithPolicy = async function (name, policy) {
@@ -121,12 +121,14 @@ module('Acceptance | cluster', function (hooks) {
     );
   });
 
-  test('redirects to secret-engines from legacy /secrets sub-path', async function (assert) {
-    await visit('/vault/secrets/cubbyhole/list');
+  test('redirects to /secrets-engines/kv/kv/list from legacy /secrets/kv/kv/list path', async function (assert) {
+    await runCmd(mountEngineCmd('kv', this.backend), false);
+    await visit('/vault/secrets/kv/kv/list');
     assert.strictEqual(
       currentURL(),
-      '/vault/secrets-engines/cubbyhole/list',
-      'Navigating to /secrets/<sub-path> redirects to /secrets-engines/<sub-path>'
+      '/vault/secrets-engines/kv/kv/list',
+      'Navigating to /secrets redirects to /secrets-engines'
     );
+    await runCmd(deleteEngineCmd('kv'));
   });
 });
