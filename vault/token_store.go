@@ -121,7 +121,7 @@ var (
 		view := storage.(*BarrierView)
 
 		switch {
-		case te.NamespaceID == namespace.RootNamespaceID && !IsServiceToken(te.ID):
+		case te.NamespaceID == namespace.RootNamespaceID && !IsServiceToken(te.ID) && !strings.HasPrefix(te.ID, consts.GetOAuthJwtPrefix()):
 			saltedID, err := ts.SaltID(ctx, te.ID)
 			if err != nil {
 				return err
@@ -1071,13 +1071,8 @@ func (ts *TokenStore) create(ctx context.Context, entry *logical.TokenEntry) err
 
 	// Validate the inline policy if it's set
 	if entry.InlinePolicy != "" {
-		// TODO (HCL_DUP_KEYS_DEPRECATION): return to ParseACLPolicy once the deprecation is done
-		_, duplicate, err := ParseACLPolicyCheckDuplicates(tokenNS, entry.InlinePolicy)
-		if err != nil {
+		if _, err := ParseACLPolicy(tokenNS, entry.InlinePolicy, WithDenySlashInTemplatedPaths(ts.core.denySlashInTemplatedPolicyPaths)); err != nil {
 			return fmt.Errorf("failed to parse inline policy for token entry: %v", err)
-		}
-		if duplicate {
-			ts.logger.Warn("HCL inline policy contains duplicate attributes, which will no longer be supported in a future version", "namespace", tokenNS.Path)
 		}
 	}
 
@@ -1158,8 +1153,9 @@ func (ts *TokenStore) create(ctx context.Context, entry *logical.TokenEntry) err
 		}
 
 		// Attach namespace ID for tokens that are not belonging to the root
-		// namespace
-		if tokenNS.ID != namespace.RootNamespaceID {
+		// namespace. JWT tokens (TokenTypeEnt) pre-compute the qualified ID in
+		// createAndStoreJwtTokenEntryJIT, so skip appending for them.
+		if tokenNS.ID != namespace.RootNamespaceID && entry.Type != logical.TokenTypeEnt {
 			entry.ID = fmt.Sprintf("%s.%s", entry.ID, tokenNS.ID)
 		}
 
@@ -1518,7 +1514,10 @@ func (ts *TokenStore) Lookup(ctx context.Context, id string) (*logical.TokenEntr
 	if id == "" {
 		return nil, fmt.Errorf("cannot lookup blank token")
 	}
-	normalizedID := normalizeOAuthJwtToId(id)
+	normalizedID, err := ts.core.normalizeJwtForLookup(ctx, id)
+	if err != nil {
+		return nil, logical.ErrInvalidRequest
+	}
 
 	// If it starts with "b." it's a batch token
 	if IsBatchToken(normalizedID) {
@@ -2683,7 +2682,10 @@ func (ts *TokenStore) handleCreate(ctx context.Context, req *logical.Request, d 
 
 // handleCreateCommon handles the auth/token/create path for creation of new tokens
 func (ts *TokenStore) handleCreateCommon(ctx context.Context, req *logical.Request, d *framework.FieldData, orphan bool, role *tsRoleEntry) (*logical.Response, error) {
-	normalizedClientToken := normalizeOAuthJwtToId(req.ClientToken)
+	normalizedClientToken, err := ts.core.normalizeJwtForLookup(ctx, req.ClientToken)
+	if err != nil {
+		return logical.ErrorResponse("invalid token"), logical.ErrInvalidRequest
+	}
 	if !orphan && IsOAuthJwtId(normalizedClientToken) {
 		return logical.ErrorResponse("JWTs cannot create child tokens"), logical.ErrInvalidRequest
 	}
@@ -3343,6 +3345,7 @@ func (ts *TokenStore) handleRevokeSelf(ctx context.Context, req *logical.Request
 // the token and all children anyways, but that is only available when there is a lease.
 func (ts *TokenStore) handleRevokeTree(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	id := data.Get("token").(string)
+
 	if id == "" {
 		return logical.ErrorResponse("missing token ID"), logical.ErrInvalidRequest
 	}
@@ -3355,10 +3358,10 @@ func (ts *TokenStore) handleRevokeTree(ctx context.Context, req *logical.Request
 }
 
 func (ts *TokenStore) revokeCommon(ctx context.Context, req *logical.Request, data *framework.FieldData, id string) (*logical.Response, error) {
-	normalizedID := normalizeOAuthJwtToId(id)
-	if IsOAuthJwtId(normalizedID) {
-		return logical.ErrorResponse("cannot revoke JWTs"), nil
+	if IsOAuthJwt(id) || IsOAuthJwtId(id) {
+		return ts.revokeCommonJWT(ctx, req, id)
 	}
+
 	te, err := ts.Lookup(ctx, id)
 	if err != nil {
 		return nil, err
@@ -3403,7 +3406,11 @@ func (ts *TokenStore) handleRevokeOrphan(ctx context.Context, req *logical.Reque
 		return logical.ErrorResponse("missing token ID"), logical.ErrInvalidRequest
 	}
 
-	normalizedID := normalizeOAuthJwtToId(id)
+	normalizedID, err := ts.core.normalizeJwtForLookup(ctx, id)
+	if err != nil {
+		return logical.ErrorResponse("invalid token"), logical.ErrInvalidRequest
+	}
+
 	if IsOAuthJwtId(normalizedID) {
 		return logical.ErrorResponse("JWTs cannot be revoked"), nil
 	}
@@ -3446,19 +3453,11 @@ func (ts *TokenStore) handleLookup(ctx context.Context, req *logical.Request, da
 		return logical.ErrorResponse("missing token ID"), logical.ErrInvalidRequest
 	}
 	if IsOAuthJwt(id) {
-		// If the token specified in the request body is different from the caller's
-		// token, resolve the token ID based on the body token's claims (JTI) instead
-		// of req.JwtUniqueId, otherwise we may silently return the caller's
-		// own token entry or fail for non-Enterprise token callers.
-		if id == req.ClientToken {
-			id = getOAuthJwtId(req.JwtUniqueId)
-		} else {
-			resolvedID, err := resolveOAuthJwtIdForLookup(id)
-			if err != nil {
-				return logical.ErrorResponse("invalid token"), logical.ErrInvalidRequest
-			}
-			id = resolvedID
+		resolvedID, err := ts.core.normalizeJwtForLookup(ctx, id)
+		if err != nil {
+			return logical.ErrorResponse("invalid token"), logical.ErrInvalidRequest
 		}
+		id = resolvedID
 	}
 	lock := locksutil.LockForKey(ts.tokenLocks, id)
 	lock.RLock()
@@ -3571,7 +3570,10 @@ func (ts *TokenStore) handleRenew(ctx context.Context, req *logical.Request, dat
 	if id == "" {
 		return logical.ErrorResponse("missing token ID"), logical.ErrInvalidRequest
 	}
-	normalizedID := normalizeOAuthJwtToId(id)
+	normalizedID, err := ts.core.normalizeJwtForLookup(ctx, id)
+	if err != nil {
+		return logical.ErrorResponse("invalid token"), logical.ErrInvalidRequest
+	}
 	if IsOAuthJwtId(normalizedID) {
 		return logical.ErrorResponse("JWTs cannot be renewed"), nil
 	}

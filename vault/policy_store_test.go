@@ -12,7 +12,6 @@ import (
 
 	log "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/vault/helper/namespace"
-	"github.com/hashicorp/vault/helper/random"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/stretchr/testify/require"
 )
@@ -124,7 +123,7 @@ func testPolicyStoreCRUD(t *testing.T, ps *PolicyStore, ns *namespace.Namespace)
 
 	// Set should work
 	ctx = namespace.ContextWithNamespace(context.Background(), ns)
-	policy, _ := ParseACLPolicy(ns, aclPolicy)
+	policy, _ := ParseACLPolicy(ns, aclPolicy, WithDenySlashInTemplatedPaths(ps.core.denySlashInTemplatedPolicyPaths))
 	err = ps.SetPolicy(ctx, policy)
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -223,7 +222,7 @@ func testPolicyStorePredefined(t *testing.T, ps *PolicyStore, ns *namespace.Name
 	}
 
 	ctx = namespace.ContextWithNamespace(context.Background(), ns)
-	updatedDefaultCeiling, err := ParseACLPolicy(ns, aclPolicy)
+	updatedDefaultCeiling, err := ParseACLPolicy(ns, aclPolicy, WithDenySlashInTemplatedPaths(ps.core.denySlashInTemplatedPolicyPaths))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -306,13 +305,13 @@ func TestPolicyStore_ACL(t *testing.T) {
 
 func testPolicyStoreACL(t *testing.T, ps *PolicyStore, ns *namespace.Namespace) {
 	ctx := namespace.ContextWithNamespace(context.Background(), ns)
-	policy, _ := ParseACLPolicy(ns, aclPolicy)
+	policy, _ := ParseACLPolicy(ns, aclPolicy, WithDenySlashInTemplatedPaths(ps.core.denySlashInTemplatedPolicyPaths))
 	err := ps.SetPolicy(ctx, policy)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	ctx = namespace.ContextWithNamespace(context.Background(), ns)
-	policy, _ = ParseACLPolicy(ns, aclPolicy2)
+	policy, _ = ParseACLPolicy(ns, aclPolicy2, WithDenySlashInTemplatedPaths(ps.core.denySlashInTemplatedPolicyPaths))
 	err = ps.SetPolicy(ctx, policy)
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -374,7 +373,7 @@ func TestPolicyStore_PoliciesByNamespaces(t *testing.T) {
 	ctxRoot := namespace.RootContext(context.Background())
 	rootNs := namespace.RootNamespace
 
-	parsedPolicy, _ := ParseACLPolicy(rootNs, aclPolicy)
+	parsedPolicy, _ := ParseACLPolicy(rootNs, aclPolicy, WithDenySlashInTemplatedPaths(ps.core.denySlashInTemplatedPolicyPaths))
 
 	err := ps.SetPolicy(ctxRoot, parsedPolicy)
 	if err != nil {
@@ -486,18 +485,8 @@ func TestPolicyStore_GetNonEGPPolicyType(t *testing.T) {
 
 // TestPolicyStore_DuplicateAttributes checks the behaviour of the policyStore.ACL method when it finds a templated
 // policy with duplicate attributes
-// TODO (HCL_DUP_KEYS_DEPRECATION): change this test to expect an error. Will need to manually create the policy since
-// ParseACLPolicy will fail on duplicate attributes.
 func TestPolicyStore_DuplicateAttributes(t *testing.T) {
-	logOut := new(bytes.Buffer)
-	conf := &CoreConfig{
-		Logger: log.New(&log.LoggerOptions{
-			Mutex:  &sync.Mutex{},
-			Level:  log.Warn,
-			Output: logOut,
-		}),
-	}
-	core, _, _ := TestCoreUnsealedWithConfig(t, conf)
+	core, _, _ := TestCoreUnsealed(t)
 	ps := core.policyStore
 	dupAttrPolicy := aclPolicy + `
 path "foo" {
@@ -505,30 +494,19 @@ path "foo" {
 	capabilities = ["read"]
 }
 `
-	t.Setenv(random.AllowHclDuplicatesEnvVar, "true")
-	policy, err := ParseACLPolicy(namespace.RootNamespace, dupAttrPolicy)
-	require.NoError(t, err)
-	// check that "list" and "read" get concatenated
-	require.Len(t, policy.Paths[len(policy.Paths)-1].Capabilities, 2)
-	policy.Templated = true
-	require.NoError(t, err)
+	// ParseACLPolicy now rejects duplicate attributes, so construct the policy manually
+	// to store the duplicate raw text and verify that re-parsing it fails.
+	policy := &Policy{
+		Name:      "dev",
+		Type:      PolicyTypeACL,
+		Templated: true,
+		Raw:       dupAttrPolicy,
+		namespace: namespace.RootNamespace,
+	}
 	ctx := namespace.RootContext(context.Background())
-	err = ps.SetPolicy(ctx, policy)
+	err := ps.SetPolicy(ctx, policy)
 	require.NoError(t, err)
 
-	logOut.Reset()
-	_, err = ps.ACL(ctx, nil, map[string][]string{namespace.RootNamespace.ID: {"dev", "ops"}})
-	require.NoError(t, err)
-	require.Contains(t, logOut.String(), "HCL policy contains duplicate attributes, which will no longer be supported in a future version")
-
-	ps.tokenPoliciesLRU.Purge()
-	logOut.Reset()
-	p, err := ps.GetPolicy(ctx, "dev", PolicyTypeACL)
-	require.NotNil(t, p)
-	require.NoError(t, err)
-	require.Contains(t, logOut.String(), "HCL policy contains duplicate attributes, which will no longer be supported in a future version")
-
-	t.Setenv(random.AllowHclDuplicatesEnvVar, "false")
 	_, err = ps.ACL(ctx, nil, map[string][]string{namespace.RootNamespace.ID: {"dev", "ops"}})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "error parsing templated policy \"dev\": failed to parse policy: The argument \"capabilities\" at 61:2 was already set. Each argument can only be defined once")
@@ -597,7 +575,7 @@ path "foo" {
 
 			// First policy
 			policy := aclPolicy + tc.policyFragment
-			parsedPolicy, err := ParseACLPolicy(namespace.RootNamespace, policy)
+			parsedPolicy, err := ParseACLPolicy(namespace.RootNamespace, policy, WithDenySlashInTemplatedPaths(core.denySlashInTemplatedPolicyPaths))
 			require.NoError(t, err)
 
 			ctx := namespace.RootContext(context.Background())

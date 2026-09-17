@@ -201,8 +201,6 @@ func NewSystemBackend(core *Core, logger log.Logger, config *logical.BackendConf
 				// to declare them here so that the generated OpenAPI spec gets their sudo status correct.
 				"seal",
 				"step-down",
-				"activation-flags/oauth-resource-server/activate",
-				"activation-flags/oauth-resource-server/deactivate",
 				"config/oauth-resource-server/*",
 			},
 
@@ -695,8 +693,50 @@ func (b *SystemBackend) handlePluginCatalogRead(ctx context.Context, _ *logical.
 	if err != nil {
 		return nil, err
 	}
+	// autoSelectedVersion is non-empty only when the user omitted -version
+	// but exactly one versioned entry existed and was auto-selected.
+	// Used below to attach a warning to the response.
+	var autoSelectedVersion string
 	if plugin == nil {
-		return nil, nil
+		if pluginVersion == "" {
+			// No unversioned entry found. Check whether versioned entries exist
+			// for this plugin name so we can give a better response.
+			var versioned []pluginutil.VersionedPlugin
+			versioned, err = b.Core.pluginCatalog.ListVersionedPlugins(ctx, pluginType)
+			if err != nil {
+				return nil, err
+			}
+			var versions []string
+			for _, vp := range versioned {
+				if vp.Name == pluginName && vp.Version != "" && !vp.Builtin {
+					versions = append(versions, vp.Version)
+				}
+			}
+			switch len(versions) {
+			case 1:
+				// Exactly one versioned entry — auto-select it and fall
+				// through to the response-building code below.
+				plugin, err = b.Core.pluginCatalog.Get(ctx, pluginName, pluginType, versions[0])
+				if err != nil {
+					return nil, err
+				}
+				autoSelectedVersion = versions[0]
+			case 0:
+				// No entries at all — fall through to the original nil, nil
+				// path below, preserving the existing 404 behavior.
+			default:
+				// Multiple versioned entries — the user must be explicit.
+				return logical.ErrorResponse(
+					"plugin %q (type %q) not found in catalog without a version specified; "+
+						"use -version to query a specific version. "+
+						"Available versions: %s",
+					pluginName, pluginTypeStr, strings.Join(versions, ", "),
+				), nil
+			}
+		}
+		if plugin == nil {
+			return nil, nil
+		}
 	}
 
 	command := plugin.Command
@@ -731,9 +771,17 @@ func (b *SystemBackend) handlePluginCatalogRead(ctx context.Context, _ *logical.
 		data["runtime"] = plugin.Runtime
 	}
 
-	return &logical.Response{
+	resp := &logical.Response{
 		Data: data,
-	}, nil
+	}
+	if autoSelectedVersion != "" {
+		resp.AddWarning(fmt.Sprintf(
+			"no version was specified; automatically selected the only registered version %q. "+
+				"Use -version=%s to avoid this message.",
+			autoSelectedVersion, autoSelectedVersion,
+		))
+	}
+	return resp, nil
 }
 
 func (b *SystemBackend) handlePluginCatalogDelete(ctx context.Context, _ *logical.Request, d *framework.FieldData) (*logical.Response, error) {
@@ -2401,6 +2449,13 @@ func (b *SystemBackend) handleRemount(ctx context.Context, req *logical.Request,
 	if strings.HasPrefix(toPath, " ") || strings.HasSuffix(toPath, " ") {
 		return logical.ErrorResponse("'to' path cannot contain trailing whitespace"), logical.ErrInvalidRequest
 	}
+
+	// Strip any leading slashes so that e.g. "/ns/mount" is treated the same
+	// as "ns/mount". A leading slash would otherwise cause namespaceByPath to
+	// find no match in the radix tree (which stores paths without a leading
+	// slash) and silently fall back to the root namespace.
+	fromPath = strings.TrimLeft(fromPath, "/")
+	toPath = strings.TrimLeft(toPath, "/")
 
 	fromPathDetails := b.Core.splitNamespaceAndMountFromPath(ns.Path, fromPath)
 	toPathDetails := b.Core.splitNamespaceAndMountFromPath(ns.Path, toPath)
@@ -4144,12 +4199,9 @@ func (b *SystemBackend) handlePoliciesSet(policyType PolicyType) framework.Opera
 			policy.Raw = string(polBytes)
 		}
 
-		var duplicate bool
 		switch policyType {
 		case PolicyTypeACL:
-			var p *Policy
-			// TODO (HCL_DUP_KEYS_DEPRECATION): go back to ParseACLPolicy once the deprecation is done
-			p, duplicate, err = ParseACLPolicyCheckDuplicates(ns, policy.Raw)
+			p, err := ParseACLPolicy(ns, policy.Raw, WithDenySlashInTemplatedPaths(b.Core.denySlashInTemplatedPolicyPaths))
 			if err != nil {
 				return handleError(err)
 			}
@@ -4173,14 +4225,6 @@ func (b *SystemBackend) handlePoliciesSet(policyType PolicyType) framework.Opera
 			return handleError(err)
 		}
 
-		if duplicate {
-			if resp == nil {
-				resp = &logical.Response{}
-			}
-			// TODO (HCL_DUP_KEYS_DEPRECATION): remove log and API Warning once the deprecation is done
-			b.logger.Warn("newly created HCL policy contains duplicate attributes, which will no longer be supported in a future version", "policy", policy.Name, "namespace", ns.Path)
-			resp.AddWarning("policy contains duplicate attributes, which will no longer be supported in a future version")
-		}
 		return resp, nil
 	}
 }
@@ -4749,10 +4793,14 @@ func (b *SystemBackend) handleWrappingWrap(ctx context.Context, req *logical.Req
 	// tokens using them we can ensure that an operator can't spoof a legit JWT
 	// wrapped token, which makes certain init/rekey/generate-root cases have
 	// better properties.
-	req.WrapInfo.Format = "uuid"
-
+	// Format is set on the response rather than mutating req.WrapInfo, which
+	// routeCommon (router.go) unconditionally restores via a deferred assignment,
+	// silently discarding any mutation made by this handler.
 	return &logical.Response{
 		Data: data.Raw,
+		WrapInfo: &wrapping.ResponseWrapInfo{
+			Format: "uuid",
+		},
 	}, nil
 }
 

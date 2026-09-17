@@ -48,6 +48,11 @@ type mySQLConnectionProducer struct {
 	// tlsConfigName is a globally unique name that references the TLS config for this instance in the mysql driver
 	tlsConfigName string
 
+	// TLS registry hooks are injectable for tests.
+	// Optional test hooks; nil means use mysql driver defaults.
+	registerTLSConfig   func(string, *tls.Config) error
+	deregisterTLSConfig func(string)
+
 	// cloudDriverName is a globally unique name that references the cloud dialer config for this instance of the driver
 	cloudDriverName    string
 	cloudDialerCleanup func() error
@@ -113,15 +118,8 @@ func (c *mySQLConnectionProducer) Init(ctx context.Context, conf map[string]inte
 		return nil, err
 	}
 
-	if tlsConfig != nil {
-		if c.tlsConfigName == "" {
-			c.tlsConfigName, err = uuid.GenerateUUID()
-			if err != nil {
-				return nil, fmt.Errorf("unable to generate UUID for TLS configuration: %w", err)
-			}
-		}
-
-		mysql.RegisterTLSConfig(c.tlsConfigName, tlsConfig)
+	if err := c.ensureTLSRegistration(tlsConfig); err != nil {
+		return nil, fmt.Errorf("unable to configure TLS registration: %w", err)
 	}
 
 	// validate auth_type if provided
@@ -244,8 +242,60 @@ func (c *mySQLConnectionProducer) Close() error {
 	}
 
 	c.db = nil
+	c.clearTLSRegistration()
 
 	return nil
+}
+
+func (c *mySQLConnectionProducer) ensureTLSRegistration(tlsConfig *tls.Config) error {
+	registerTLSConfig := c.registerTLSConfig
+	if registerTLSConfig == nil {
+		// Default to production mysql driver registration.
+		registerTLSConfig = mysql.RegisterTLSConfig
+	}
+	deregisterTLSConfig := c.deregisterTLSConfig
+	if deregisterTLSConfig == nil {
+		// Default to production mysql driver deregistration.
+		deregisterTLSConfig = mysql.DeregisterTLSConfig
+	}
+
+	if tlsConfig == nil {
+		c.clearTLSRegistration()
+		return nil
+	}
+
+	// Use previous/next naming to make replacement sequencing easy to follow:
+	// register next, swap active key, then deregister previous.
+	previousTLSConfigName := c.tlsConfigName
+	nextTLSConfigName, err := uuid.GenerateUUID()
+	if err != nil {
+		return fmt.Errorf("unable to generate UUID for TLS configuration: %w", err)
+	}
+
+	if err := registerTLSConfig(nextTLSConfigName, tlsConfig); err != nil {
+		return fmt.Errorf("unable to register TLS config: %w", err)
+	}
+
+	c.tlsConfigName = nextTLSConfigName
+	if previousTLSConfigName != "" {
+		deregisterTLSConfig(previousTLSConfigName)
+	}
+	return nil
+}
+
+func (c *mySQLConnectionProducer) clearTLSRegistration() {
+	deregisterTLSConfig := c.deregisterTLSConfig
+	if deregisterTLSConfig == nil {
+		deregisterTLSConfig = mysql.DeregisterTLSConfig
+	}
+
+	if c.tlsConfigName == "" {
+		return
+	}
+
+	deregisterTLSConfig(c.tlsConfigName)
+
+	c.tlsConfigName = ""
 }
 
 func (c *mySQLConnectionProducer) getTLSAuth() (tlsConfig *tls.Config, err error) {

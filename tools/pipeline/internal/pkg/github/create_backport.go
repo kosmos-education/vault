@@ -86,6 +86,11 @@ type CreateBackportReq struct {
 	// BackportLabelPrefix is the backport label prefix. E.g. "backport". This
 	// should only be used for testing before the new workflow is active.
 	BackportLabelPrefix string
+
+	// BackportFailedLabel is the label to apply to the original pull request
+	// when one or more backport attempts fail. E.g. "backport-failed". When
+	// empty, no label is applied.
+	BackportFailedLabel string
 }
 
 // NewCreateBackportReqOpt is a functional option to set fields when calling
@@ -145,80 +150,88 @@ func WithCreateBackportReqOwner(owner string) NewCreateBackportReqOpt {
 	}
 }
 
-// WithCreateBrackportReqRepo sets the Repo
-func WithCreateBrackportReqRepo(repo string) NewCreateBackportReqOpt {
+// WithCreateBackportReqRepo sets the Repo
+func WithCreateBackportReqRepo(repo string) NewCreateBackportReqOpt {
 	return func(req *CreateBackportReq) {
 		req.Repo = repo
 	}
 }
 
-// WithCreateBrackportReqRepoDir sets the RepoDir
-func WithCreateBrackportReqRepoDir(dir string) NewCreateBackportReqOpt {
+// WithCreateBackportReqRepoDir sets the RepoDir
+func WithCreateBackportReqRepoDir(dir string) NewCreateBackportReqOpt {
 	return func(req *CreateBackportReq) {
 		req.RepoDir = dir
 	}
 }
 
-// WithCreateBrackportReqPullNumber sets the PullNumber
-func WithCreateBrackportReqPullNumber(number uint) NewCreateBackportReqOpt {
+// WithCreateBackportReqPullNumber sets the PullNumber
+func WithCreateBackportReqPullNumber(number uint) NewCreateBackportReqOpt {
 	return func(req *CreateBackportReq) {
 		req.PullNumber = number
 	}
 }
 
-// WithCreateBrackportReqBaseOrigin sets the BaseOrigin
-func WithCreateBrackportReqBaseOrigin(origin string) NewCreateBackportReqOpt {
+// WithCreateBackportReqBaseOrigin sets the BaseOrigin
+func WithCreateBackportReqBaseOrigin(origin string) NewCreateBackportReqOpt {
 	return func(req *CreateBackportReq) {
 		req.BaseOrigin = origin
 	}
 }
 
-// WithCreateBrackportReqVersionsDecodeRes sets the VersionsDecodeRes
-func WithCreateBrackportReqVersionsDecodeRes(res *releases.DecodeRes) NewCreateBackportReqOpt {
+// WithCreateBackportReqVersionsDecodeRes sets the VersionsDecodeRes
+func WithCreateBackportReqVersionsDecodeRes(res *releases.DecodeRes) NewCreateBackportReqOpt {
 	return func(req *CreateBackportReq) {
 		req.VersionsDecodeRes = res
 	}
 }
 
-// WithCreateBrackportReqCEExclude sets the CEExclude
-func WithCreateBrackportReqCEExclude(exclude changed.FileGroups) NewCreateBackportReqOpt {
+// WithCreateBackportReqCEExclude sets the CEExclude
+func WithCreateBackportReqCEExclude(exclude changed.FileGroups) NewCreateBackportReqOpt {
 	return func(req *CreateBackportReq) {
 		req.CEExclude = exclude
 	}
 }
 
-// WithCreateBrackportReqCEBranchPrefix sets the CEBranchPrefix
-func WithCreateBrackportReqCEBranchPrefix(prefix string) NewCreateBackportReqOpt {
+// WithCreateBackportReqCEBranchPrefix sets the CEBranchPrefix
+func WithCreateBackportReqCEBranchPrefix(prefix string) NewCreateBackportReqOpt {
 	return func(req *CreateBackportReq) {
 		req.CEBranchPrefix = prefix
 	}
 }
 
-// WithCreateBrackportReqConfigDecodeRes sets the DecodeRes
-func WithCreateBrackportReqConfigDecodeRes(res *config.DecodeRes) NewCreateBackportReqOpt {
+// WithCreateBackportReqConfigDecodeRes sets the DecodeRes
+func WithCreateBackportReqConfigDecodeRes(res *config.DecodeRes) NewCreateBackportReqOpt {
 	return func(req *CreateBackportReq) {
 		req.ConfigDecodeRes = res
 	}
 }
 
-// WithCreateBrackportReqAllowInactiveGroups sets the CEAllowInactiveGroups
-func WithCreateBrackportReqAllowInactiveGroups(groups changed.FileGroups) NewCreateBackportReqOpt {
+// WithCreateBackportReqAllowInactiveGroups sets the CEAllowInactiveGroups
+func WithCreateBackportReqAllowInactiveGroups(groups changed.FileGroups) NewCreateBackportReqOpt {
 	return func(req *CreateBackportReq) {
 		req.CEAllowInactiveGroups = groups
 	}
 }
 
-// WithCreateBrackportReqEntBranchPrefix sets the EntBranchPrefix
-func WithCreateBrackportReqEntBranchPrefix(prefix string) NewCreateBackportReqOpt {
+// WithCreateBackportReqEntBranchPrefix sets the EntBranchPrefix
+func WithCreateBackportReqEntBranchPrefix(prefix string) NewCreateBackportReqOpt {
 	return func(req *CreateBackportReq) {
 		req.EntBranchPrefix = prefix
 	}
 }
 
-// WithCreateBrackportReqBackportLabelPrefix sets the BackportLabelPrefix
-func WithCreateBrackportReqBackportLabelPrefix(prefix string) NewCreateBackportReqOpt {
+// WithCreateBackportReqBackportLabelPrefix sets the BackportLabelPrefix
+func WithCreateBackportReqBackportLabelPrefix(prefix string) NewCreateBackportReqOpt {
 	return func(req *CreateBackportReq) {
 		req.BackportLabelPrefix = prefix
+	}
+}
+
+// WithCreateBackportReqBackportFailedLabel sets the BackportFailedLabel, which
+// is applied to the original pull request when one or more backport attempts fail.
+func WithCreateBackportReqBackportFailedLabel(label string) NewCreateBackportReqOpt {
+	return func(req *CreateBackportReq) {
+		req.BackportFailedLabel = label
 	}
 }
 
@@ -268,7 +281,8 @@ func (r *CreateBackportReq) Run(
 ) (res *CreateBackportRes) {
 	res = &CreateBackportRes{Attempts: map[string]*CreateBackportAttempt{}}
 
-	slog.Default().DebugContext(slogctx.Append(ctx,
+	slog.Default().DebugContext(slogctx.Append(
+		ctx,
 		slog.String("owner", r.Owner),
 		slog.String("repo", r.Repo),
 		slog.String("repo-dir", r.RepoDir),
@@ -302,6 +316,10 @@ func (r *CreateBackportReq) Run(
 		res.Comment, err1 = createPullRequestComment(
 			ctx, github, r.Owner, r.Repo, int(r.PullNumber), res.CommentBody(),
 		)
+
+		// Apply or remove the backport failed label on the original PR depending
+		// on whether any errors occurred during the run.
+		err1 = errors.Join(err1, r.syncBackportFailedLabel(ctx, github, res.Err()))
 
 		// Set our finalized error on our response and also update our returned error
 		res.Error = errors.Join(res.Error, err1)
@@ -394,8 +412,10 @@ func (r *CreateBackportReq) Run(
 				Treeish: fmt.Sprintf("%s/%s", r.BaseOrigin, baseRef),
 			})
 			if err != nil {
-				res.Error = errors.Join(res.Error, fmt.Errorf(
-					"resetting repository after failed attempt: %s: %w", resetRes.String(), err),
+				res.Error = errors.Join(
+					res.Error, fmt.Errorf(
+						"resetting repository after failed attempt: %s: %w", resetRes.String(), err,
+					),
 				)
 				// If we can't reset the repository there's no point in trying further
 				// attempts as we must assume something has gone horribly wrong.
@@ -614,7 +634,8 @@ func (r *CreateBackportReq) backportRef(
 	branchName := r.backportBranchNameForRef(ref, prBranch)
 	res.TargetRef = branchName
 	commitSHA := pr.GetMergeCommitSHA()
-	bigCtx := slogctx.Append(ctx,
+	bigCtx := slogctx.Append(
+		ctx,
 		slog.String("target-base-ref", ref),
 		slog.String("target-ref-version", baseRefVersion),
 		slog.String("target-branch", branchName),
@@ -625,7 +646,8 @@ func (r *CreateBackportReq) backportRef(
 	if reason, shouldSkip := r.shouldSkipRef(
 		ctx, baseRefVersion, ref, activeVersions, changedFiles,
 	); shouldSkip {
-		slog.Default().InfoContext(slogctx.Append(bigCtx,
+		slog.Default().InfoContext(slogctx.Append(
+			bigCtx,
 			slog.String("base-ref-version", baseRefVersion),
 			slog.String("target-ref", ref),
 			slog.String("reason", reason),
@@ -759,6 +781,20 @@ func (r *CreateBackportReq) backportRef(
 		return res
 	}
 
+	// Request review from the PR author
+	err = addReviewers(
+		ctx,
+		github,
+		r.Owner,
+		r.Repo,
+		int(res.PullRequest.GetNumber()),
+		[]string{pr.GetUser().GetLogin()},
+	)
+	if err != nil {
+		res.Error = fmt.Errorf("requesting review from PR author on backport pull request %w", err)
+		return res
+	}
+
 	// Copy non-backport labels from the original PR to the backport PR
 	labelsToAdd := filterNonBackportLabels(pr.Labels, r.BackportLabelPrefix)
 	err = addLabelsToIssue(
@@ -794,11 +830,13 @@ func (r *CreateBackportReq) backportCECommitWithPatch(
 	files := changed.Files{}
 	for _, file := range changedFiles.Files {
 		if file.Groups.Any(r.CEExclude) {
-			slog.Default().DebugContext(slogctx.Append(ctx,
+			slog.Default().DebugContext(slogctx.Append(
+				ctx,
 				slog.String("file", file.Name()),
 			), "skipping file as it is in one-or-more excluded groups")
 		} else {
-			slog.Default().DebugContext(slogctx.Append(ctx,
+			slog.Default().DebugContext(slogctx.Append(
+				ctx,
 				slog.String("file", file.Name()),
 			), "including changed file")
 			files = append(files, file)
@@ -882,7 +920,8 @@ func (r *CreateBackportReq) determineBackportRefs(
 	labels Labels,
 ) (res []string) {
 	baseRefVersion := r.baseRefVersion(baseRef)
-	slog.Default().DebugContext(slogctx.Append(ctx,
+	slog.Default().DebugContext(slogctx.Append(
+		ctx,
 		slog.String("labels", strings.Join(labels.Names(), " ")),
 		slog.String("base-ref", baseRef),
 		slog.String("base-ref-version", baseRefVersion),
@@ -907,7 +946,8 @@ func (r *CreateBackportReq) determineBackportRefs(
 		for _, label := range labels.Names() {
 			parts := strings.SplitN(label, "/", 2)
 			if len(parts) != 2 || parts[0] != r.BackportLabelPrefix {
-				slog.Default().DebugContext(slogctx.Append(ctx,
+				slog.Default().DebugContext(slogctx.Append(
+					ctx,
 					slog.String("label", label),
 					slog.String("backport-label-prefix", r.BackportLabelPrefix),
 				), "skipping label because it does not match the backport label prefix")
@@ -915,7 +955,8 @@ func (r *CreateBackportReq) determineBackportRefs(
 			}
 
 			if parts[1] == baseRefVersion {
-				slog.Default().WarnContext(slogctx.Append(ctx,
+				slog.Default().WarnContext(slogctx.Append(
+					ctx,
 					slog.String("label", label),
 					slog.String("base-ref-version", baseRefVersion),
 				), "skipping label because we cannot backport to the same reference")
@@ -934,7 +975,8 @@ func (r *CreateBackportReq) determineBackportRefs(
 		for _, label := range labels.Names() {
 			parts := strings.SplitN(label, "/", 2)
 			if len(parts) != 2 || parts[0] != r.BackportLabelPrefix {
-				slog.Default().DebugContext(slogctx.Append(ctx,
+				slog.Default().DebugContext(slogctx.Append(
+					ctx,
 					slog.String("label", label),
 					slog.String("backport-label-prefix", r.BackportLabelPrefix),
 				), "skipping label because it does not match the backport label prefix")
@@ -942,7 +984,8 @@ func (r *CreateBackportReq) determineBackportRefs(
 			}
 
 			if parts[1] == baseRefVersion {
-				slog.Default().WarnContext(slogctx.Append(ctx,
+				slog.Default().WarnContext(slogctx.Append(
+					ctx,
 					slog.String("label", label),
 					slog.String("base-ref-version", baseRefVersion),
 				), "skipping label because we cannot backport to the same reference")
@@ -954,7 +997,8 @@ func (r *CreateBackportReq) determineBackportRefs(
 		}
 	}
 
-	slog.Default().DebugContext(slogctx.Append(ctx,
+	slog.Default().DebugContext(slogctx.Append(
+		ctx,
 		slog.String("refs", strings.Join(res, ",")),
 	), "determined target backport references")
 
@@ -1039,7 +1083,8 @@ func (r *CreateBackportReq) shouldSkipRef(
 	activeVersions map[string]*releases.Version,
 	changedFiles *ListChangedFilesRes,
 ) (string, bool) {
-	slog.Default().DebugContext(slogctx.Append(ctx,
+	slog.Default().DebugContext(slogctx.Append(
+		ctx,
 		slog.String("base-ref-version", baseRefVersion),
 		slog.String("target-ref", ref),
 	), "determining whether to skip backport")
@@ -1100,4 +1145,23 @@ func (r *CreateBackportReq) shouldSkipRef(
 	return fmt.Sprintf(
 		"could not find branch in active branches configuration: %s", baseRefVersion,
 	), true
+}
+
+// syncBackportFailedLabel applies the BackportFailedLabel to the original PR
+// when runErr is non-nil, and removes it when runErr is nil (clearing any label
+// set by a previous failed run). It is a no-op when BackportFailedLabel is empty.
+func (r *CreateBackportReq) syncBackportFailedLabel(
+	ctx context.Context,
+	github *libgithub.Client,
+	runErr error,
+) error {
+	if r.BackportFailedLabel == "" {
+		return nil
+	}
+
+	if runErr != nil {
+		return addLabelsToIssue(ctx, github, r.Owner, r.Repo, int(r.PullNumber), []string{r.BackportFailedLabel})
+	}
+
+	return removeLabelFromIssue(ctx, github, r.Owner, r.Repo, int(r.PullNumber), r.BackportFailedLabel)
 }

@@ -67,11 +67,16 @@ func (p *AutomatedRotationParams) ParseAutomatedRotationFields(d *framework.Fiel
 				return fmt.Errorf("failed to parse provided rotation_schedule: %w", err)
 			}
 		}
+
+		// Explicitly set the rotation period to 0 when using a schedule.
+		if p.RotationSchedule != "" {
+			p.RotationPeriod = time.Duration(0)
+		}
 	}
 
 	if windowOk {
 		if periodOk && rotationPeriodSecondsRaw.(int) != 0 && rotationWindowSecondsRaw.(int) != 0 {
-			return fmt.Errorf("rotation_window does not apply to period")
+			return fmt.Errorf("rotation_window does not apply to rotation_period")
 		}
 		rotationWindowSeconds := rotationWindowSecondsRaw.(int)
 		p.RotationWindow = time.Duration(rotationWindowSeconds) * time.Second
@@ -80,6 +85,11 @@ func (p *AutomatedRotationParams) ParseAutomatedRotationFields(d *framework.Fiel
 	if periodOk {
 		rotationPeriodSeconds := rotationPeriodSecondsRaw.(int)
 		p.RotationPeriod = time.Duration(rotationPeriodSeconds) * time.Second
+
+		// Explicitly set the rotation schedule to empty when using a period.
+		if p.RotationPeriod != 0 {
+			p.RotationSchedule = ""
+		}
 	}
 
 	if (windowOk && rotationWindowSecondsRaw.(int) != 0) && !scheduleOk {
@@ -99,7 +109,7 @@ func (p *AutomatedRotationParams) ParseAutomatedRotationFields(d *framework.Fiel
 
 // Use PopulateSetAutomatedRotationData instead, *unless* all these
 // fields are necessary to maintain backwards compatibility with the plugin's pre-existing response API.
-// PopulateAutomatedRotationData adds PluginIdentityTokenParams info into the given map.
+// PopulateAutomatedRotationData adds AutomatedRotationParams info into the given map.
 func (p *AutomatedRotationParams) PopulateAutomatedRotationData(m map[string]interface{}) {
 	m["rotation_schedule"] = p.RotationSchedule
 	m["rotation_window"] = p.RotationWindow.Seconds()
@@ -108,7 +118,7 @@ func (p *AutomatedRotationParams) PopulateAutomatedRotationData(m map[string]int
 	m["rotation_policy"] = p.RotationPolicy
 }
 
-// PopulateSetAutomatedRotationData adds PluginIdentityTokenParams info into the given map, based
+// PopulateSetAutomatedRotationData adds AutomatedRotationParams info into the given map, based
 // on which fields were set for rotation. Setting a rotation schedule will not return a rotation
 // period, and setting a rotation period will not return a rotation schedule or rotation window.
 func (p *AutomatedRotationParams) PopulateSetAutomatedRotationData(m map[string]interface{}) {

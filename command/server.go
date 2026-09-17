@@ -111,7 +111,7 @@ type ServerCommand struct {
 	reloadFuncs       *map[string][]reloadutil.ReloadFunc
 	startedCh         chan (struct{}) // for tests
 	reloadedCh        chan (struct{}) // for tests
-	licenseReloadedCh chan (error)    // for tests
+	licenseReloadedCh chan error      // for tests
 
 	allLoggers []hclog.Logger
 
@@ -436,14 +436,9 @@ func (c *ServerCommand) parseConfig() (*server.Config, []configutil.ConfigError,
 	// Load the configuration
 	var config *server.Config
 	for _, path := range c.flagConfigs {
-		// TODO (HCL_DUP_KEYS_DEPRECATION): return to server.LoadConfig once deprecation is done
-		current, duplicate, err := server.LoadConfigCheckDuplicate(path)
+		current, err := server.LoadConfig(path)
 		if err != nil {
 			return nil, nil, fmt.Errorf("error loading configuration from %s: %w", path, err)
-		}
-		if duplicate {
-			c.UI.Warn(fmt.Sprintf(
-				"WARNING: Duplicate keys found in the Vault server configuration file %q, duplicate keys in HCL files are deprecated and will be forbidden in a future release.", path))
 		}
 
 		configErrors = append(configErrors, current.Validate(path)...)
@@ -1165,6 +1160,16 @@ func (c *ServerCommand) Run(args []string) int {
 
 	logProxyEnvironmentVariables(c.logger)
 
+	envDenySlash := os.Getenv("VAULT_DENY_SLASH_IN_TEMPLATED_PATHS")
+	if envDenySlash != "" {
+		var err error
+		config.DenySlashInTemplatedPaths, err = strconv.ParseBool(envDenySlash)
+		if err != nil {
+			c.UI.Output("Error parsing the environment variable VAULT_DENY_SLASH_IN_TEMPLATED_PATHS")
+			return 1
+		}
+	}
+
 	envMlock := os.Getenv("VAULT_DISABLE_MLOCK")
 	if envMlock != "" {
 		var err error
@@ -1757,6 +1762,11 @@ func (c *ServerCommand) Run(args []string) int {
 				var srConfig *map[string]string
 				if config.ServiceRegistration != nil {
 					srConfig = &config.ServiceRegistration.Config
+				} else if config.Storage.Type == storageTypeConsul {
+					// If no explicit service_registration block exists but Consul is
+					// the storage backend, maintain the implicit registration that was
+					// set up at startup. Passing nil would permanently deregister Vault.
+					srConfig = &config.Storage.Config
 				}
 				sr.NotifyConfigurationReload(srConfig)
 			}
@@ -1910,9 +1920,7 @@ func (c *ServerCommand) reloadConfigFiles() (*server.Config, []configutil.Config
 	var config *server.Config
 	var configErrors []configutil.ConfigError
 	for _, path := range c.flagConfigs {
-		// don't care about HCL duplicate attributes here on reloading
-		// TODO (HCL_DUP_KEYS_DEPRECATION): go back to server.LoadConfig and remove duplicate when deprecation is done
-		current, _, err := server.LoadConfigCheckDuplicate(path)
+		current, err := server.LoadConfig(path)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2954,57 +2962,58 @@ func createCoreConfig(c *ServerCommand, config *server.Config, backend physical.
 	metricsHelper *metricsutil.MetricsHelper, metricSink *metricsutil.ClusterMetricSink, secureRandomReader io.Reader,
 ) vault.CoreConfig {
 	coreConfig := &vault.CoreConfig{
-		RawConfig:                      config,
-		Physical:                       backend,
-		RedirectAddr:                   config.Storage.RedirectAddr,
-		StorageType:                    config.Storage.Type,
-		HAPhysical:                     nil,
-		ServiceRegistration:            configSR,
-		Seal:                           barrierSeal,
-		UnwrapSeal:                     unwrapSeal,
-		AuditBackends:                  c.AuditBackends,
-		CredentialBackends:             c.CredentialBackends,
-		LogicalBackends:                c.LogicalBackends,
-		LogLevel:                       config.LogLevel,
-		Logger:                         c.logger,
-		DetectDeadlocks:                config.DetectDeadlocks,
-		ImpreciseLeaseRoleTracking:     config.ImpreciseLeaseRoleTracking,
-		DisableSentinelTrace:           config.DisableSentinelTrace,
-		DisableCache:                   config.DisableCache,
-		DisableMlock:                   config.DisableMlock,
-		MaxLeaseTTL:                    config.MaxLeaseTTL,
-		DefaultLeaseTTL:                config.DefaultLeaseTTL,
-		RemoveIrrevocableLeaseAfter:    config.RemoveIrrevocableLeaseAfter,
-		ClusterName:                    config.ClusterName,
-		CacheSize:                      config.CacheSize,
-		PluginDirectory:                config.PluginDirectory,
-		PluginTmpdir:                   config.PluginTmpdir,
-		PluginFileUid:                  config.PluginFileUid,
-		PluginFilePermissions:          config.PluginFilePermissions,
-		EnableUI:                       config.EnableUI,
-		EnableRaw:                      config.EnableRawEndpoint,
-		EnableIntrospection:            config.EnableIntrospectionEndpoint,
-		DisableSealWrap:                config.DisableSealWrap,
-		DisablePerformanceStandby:      config.DisablePerformanceStandby,
-		DisableIndexing:                config.DisableIndexing,
-		AllowAuditLogPrefixing:         config.AllowAuditLogPrefixing,
-		AllLoggers:                     c.allLoggers,
-		BuiltinRegistry:                builtinplugins.Registry,
-		DisableKeyEncodingChecks:       config.DisablePrintableCheck,
-		MetricsHelper:                  metricsHelper,
-		MetricSink:                     metricSink,
-		SecureRandomReader:             secureRandomReader,
-		EnableResponseHeaderHostname:   config.EnableResponseHeaderHostname,
-		EnableResponseHeaderRaftNodeID: config.EnableResponseHeaderRaftNodeID,
-		License:                        config.License,
-		LicensePath:                    config.LicensePath,
-		LicenseReload:                  c.licenseReloadedCh,
-		DisableSSCTokens:               config.DisableSSCTokens,
-		Experiments:                    config.Experiments,
-		AdministrativeNamespacePath:    config.AdministrativeNamespacePath,
-		ObservationSystemConfig:        config.Observations,
-		ReportingScanDirectory:         config.ReportingScanDirectory,
-		EnableUnauthenticatedAccess:    config.EnableUnauthenticatedAccess,
+		RawConfig:                       config,
+		Physical:                        backend,
+		RedirectAddr:                    config.Storage.RedirectAddr,
+		StorageType:                     config.Storage.Type,
+		HAPhysical:                      nil,
+		ServiceRegistration:             configSR,
+		Seal:                            barrierSeal,
+		UnwrapSeal:                      unwrapSeal,
+		AuditBackends:                   c.AuditBackends,
+		CredentialBackends:              c.CredentialBackends,
+		LogicalBackends:                 c.LogicalBackends,
+		LogLevel:                        config.LogLevel,
+		Logger:                          c.logger,
+		DetectDeadlocks:                 config.DetectDeadlocks,
+		ImpreciseLeaseRoleTracking:      config.ImpreciseLeaseRoleTracking,
+		DisableSentinelTrace:            config.DisableSentinelTrace,
+		DisableCache:                    config.DisableCache,
+		DisableMlock:                    config.DisableMlock,
+		MaxLeaseTTL:                     config.MaxLeaseTTL,
+		DefaultLeaseTTL:                 config.DefaultLeaseTTL,
+		RemoveIrrevocableLeaseAfter:     config.RemoveIrrevocableLeaseAfter,
+		ClusterName:                     config.ClusterName,
+		CacheSize:                       config.CacheSize,
+		PluginDirectory:                 config.PluginDirectory,
+		PluginTmpdir:                    config.PluginTmpdir,
+		PluginFileUid:                   config.PluginFileUid,
+		PluginFilePermissions:           config.PluginFilePermissions,
+		EnableUI:                        config.EnableUI,
+		EnableRaw:                       config.EnableRawEndpoint,
+		EnableIntrospection:             config.EnableIntrospectionEndpoint,
+		DisableSealWrap:                 config.DisableSealWrap,
+		DisablePerformanceStandby:       config.DisablePerformanceStandby,
+		DisableIndexing:                 config.DisableIndexing,
+		AllowAuditLogPrefixing:          config.AllowAuditLogPrefixing,
+		AllLoggers:                      c.allLoggers,
+		BuiltinRegistry:                 builtinplugins.Registry,
+		DisableKeyEncodingChecks:        config.DisablePrintableCheck,
+		MetricsHelper:                   metricsHelper,
+		MetricSink:                      metricSink,
+		SecureRandomReader:              secureRandomReader,
+		EnableResponseHeaderHostname:    config.EnableResponseHeaderHostname,
+		EnableResponseHeaderRaftNodeID:  config.EnableResponseHeaderRaftNodeID,
+		License:                         config.License,
+		LicensePath:                     config.LicensePath,
+		LicenseReload:                   c.licenseReloadedCh,
+		DisableSSCTokens:                config.DisableSSCTokens,
+		Experiments:                     config.Experiments,
+		AdministrativeNamespacePath:     config.AdministrativeNamespacePath,
+		ObservationSystemConfig:         config.Observations,
+		ReportingScanDirectory:          config.ReportingScanDirectory,
+		EnableUnauthenticatedAccess:     config.EnableUnauthenticatedAccess,
+		DenySlashInTemplatedPolicyPaths: config.DenySlashInTemplatedPaths,
 	}
 
 	if c.flagDev {

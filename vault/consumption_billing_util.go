@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/vault/helper/timeutil"
-	"github.com/hashicorp/vault/sdk/helper/jsonutil"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/hashicorp/vault/vault/billing"
 )
@@ -69,14 +68,15 @@ func (c *Core) UpdateMaxThirdPartyPluginCounts(ctx context.Context, currentMonth
 		return 0, ErrConsumptionBillingNotInitialized
 	}
 
+	currentThirdPartyPluginCounts, err := c.ListDeduplicatedExternalSecretPlugins(ctx)
+	if err != nil {
+		return 0, err
+	}
+
 	cb.BillingStorageLock.Lock()
 	defer cb.BillingStorageLock.Unlock()
 
 	previousThirdPartyPluginCounts, err := c.getStoredThirdPartyPluginCountsLocked(ctx, billing.LocalPrefix, currentMonth)
-	if err != nil {
-		return 0, err
-	}
-	currentThirdPartyPluginCounts, err := c.ListDeduplicatedExternalSecretPlugins(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -253,9 +253,9 @@ func (c *Core) UpdateMaxRoleAndManagedKeyCounts(ctx context.Context, localPathPr
 		return nil, nil, ErrConsumptionBillingNotInitialized
 	}
 
-	cb.BillingStorageLock.Lock()
-	defer cb.BillingStorageLock.Unlock()
-
+	// getRoleAndManagedKeyCountsInternal traverses mounts and
+	// may acquire other locks, so holding the billing storage lock here can create
+	// lock-order inversions.
 	local := localPathPrefix == billing.LocalPrefix
 	currentRoleCounts, currentManagedKeyCounts, err := c.getRoleAndManagedKeyCountsInternal(local, !local, true)
 	if err != nil {
@@ -269,6 +269,9 @@ func (c *Core) UpdateMaxRoleAndManagedKeyCounts(ctx context.Context, localPathPr
 	if currentManagedKeyCounts == nil {
 		currentManagedKeyCounts = &ManagedKeyCounts{}
 	}
+
+	cb.BillingStorageLock.Lock()
+	defer cb.BillingStorageLock.Unlock()
 
 	// get max role counts
 	maxRoleCounts, err := c.updateMaxRoleCounts(ctx, currentRoleCounts, localPathPrefix, currentMonth)
@@ -925,8 +928,7 @@ func (c *Core) getStoredSSHDurationAdjustedCertCountLocked(ctx context.Context, 
 		return 0, err
 	}
 
-	var certCount float64
-	err = se.DecodeJSON(&certCount)
+	certCount, err := strconv.ParseFloat(string(se.Value), 64)
 	if err != nil {
 		return 0, fmt.Errorf("error decoding current SSH duration adjusted cert count: %w", err)
 	}
@@ -960,14 +962,9 @@ func (c *Core) UpdateStoredSSHDurationAdjustedCertCount(ctx context.Context, cur
 func (c *Core) storeSSHDurationAdjustedCertCountLocked(ctx context.Context, localPathPrefix string, currentMonth time.Time, certCount float64) error {
 	billingPath := billing.GetMonthlyBillingMetricPath(localPathPrefix, currentMonth, billing.SSHCertificateMetric)
 
-	countBytes, err := jsonutil.EncodeJSON(certCount)
-	if err != nil {
-		return err
-	}
-
 	entry := &logical.StorageEntry{
 		Key:   billingPath,
-		Value: countBytes,
+		Value: []byte(strconv.FormatFloat(certCount, 'f', 4, 64)),
 	}
 
 	view, ok := c.GetBillingSubView()
@@ -1008,8 +1005,7 @@ func (c *Core) getStoredSSHOTPCountLocked(ctx context.Context, localPathPrefix s
 		return 0, err
 	}
 
-	var otpCount float64
-	err = se.DecodeJSON(&otpCount)
+	otpCount, err := strconv.ParseFloat(string(se.Value), 64)
 	if err != nil {
 		return 0, fmt.Errorf("error decoding current OTP cert count: %w", err)
 	}
@@ -1043,14 +1039,9 @@ func (c *Core) UpdateStoredSSHOTPCount(ctx context.Context, currentMonth time.Ti
 func (c *Core) storeSSHOTPCountLocked(ctx context.Context, localPathPrefix string, currentMonth time.Time, otpCount float64) error {
 	billingPath := billing.GetMonthlyBillingMetricPath(localPathPrefix, currentMonth, billing.SSHOTPMetric)
 
-	countBytes, err := jsonutil.EncodeJSON(otpCount)
-	if err != nil {
-		return err
-	}
-
 	entry := &logical.StorageEntry{
 		Key:   billingPath,
-		Value: countBytes,
+		Value: []byte(strconv.FormatFloat(otpCount, 'f', 4, 64)),
 	}
 
 	view, ok := c.GetBillingSubView()
@@ -1099,13 +1090,13 @@ func (c *Core) getStoredOidcDurationAdjustedCountLocked(ctx context.Context, cur
 	return currentCount, nil
 }
 
-// IncrementOidcTokenCount increments the in-memory OIDC token count and total duration hours.
+// IncrementOidcTokenCount increments the in-memory OIDC duration-adjusted token count.
 // This is called each time an OIDC token is created. The counts are flushed to storage
-// periodically by the consumption billing metrics worker.
-// Note: OidcTokenDuration is not normalized and is duration-adjusted during flush to storage in UpdateOidcDurationAdjustedCount.
+// periodically by the consumption billing metrics worker. durationSeconds is the raw token TTL;
+// it is normalized to duration-adjusted units immediately.
 func (c *Core) IncrementOidcTokenCount(durationSeconds float64) {
-	c.consumptionBillingLock.Lock()
-	defer c.consumptionBillingLock.Unlock()
+	c.consumptionBillingLock.RLock()
+	defer c.consumptionBillingLock.RUnlock()
 
 	cb := c.consumptionBilling
 
@@ -1113,12 +1104,12 @@ func (c *Core) IncrementOidcTokenCount(durationSeconds float64) {
 		return
 	}
 
-	// Update raw token duration
-	cb.IdentityTokenUnits.OidcTokenDuration.Add(durationSeconds)
+	// Update duration-adjusted units
+	cb.IdentityTokenUnits.OidcTokenUnits.Add(DurationAdjustedTokenCount(durationSeconds))
 }
 
-// UpdateOidcDurationAdjustedCountFromMemory reads the in-memory OIDC token counts and duration,
-// normalizes them to duration-adjusted counts, and flushes them to storage.
+// UpdateOidcDurationAdjustedCount reads the in-memory OIDC duration-adjusted token count
+// and flushes it to storage.
 // This is called periodically by the consumption billing metrics worker.
 func (c *Core) UpdateOidcDurationAdjustedCount(ctx context.Context, currentMonth time.Time) error {
 	c.consumptionBillingLock.RLock()
@@ -1132,14 +1123,12 @@ func (c *Core) UpdateOidcDurationAdjustedCount(ctx context.Context, currentMonth
 	cb.BillingStorageLock.Lock()
 	defer cb.BillingStorageLock.Unlock()
 
-	// Get in-memory raw token duration and reset value in memory
-	// Using Swap to atomically reset the value. If Vault crashes after a successful storage update but before reset, this prevents double counting.
-	totalTokenDurationSecondsFromMemory := cb.IdentityTokenUnits.OidcTokenDuration.Swap(0)
+	// Swap out the accumulated duration-adjusted units (already normalized per-token in
+	// IncrementOidcTokenCount). Using Swap to atomically reset so a crash after a successful
+	// storage write does not cause double-counting on the next flush.
+	units := cb.IdentityTokenUnits.OidcTokenUnits.Swap(0)
 
-	// Calculate duration-adjusted count from raw data
-	durationAdjustedCountMemory := DurationAdjustedTokenCount(totalTokenDurationSecondsFromMemory)
-
-	return c.storeOidcDurationAdjustedCountLocked(ctx, currentMonth, durationAdjustedCountMemory)
+	return c.storeOidcDurationAdjustedCountLocked(ctx, currentMonth, units)
 }
 
 func (c *Core) storeOidcDurationAdjustedCountLocked(ctx context.Context, currentMonth time.Time, inc float64) error {

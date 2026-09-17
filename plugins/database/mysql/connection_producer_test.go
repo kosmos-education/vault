@@ -5,6 +5,7 @@ package mysql
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"fmt"
 	"io/ioutil"
@@ -19,6 +20,260 @@ import (
 	"github.com/hashicorp/vault/sdk/database/helper/dbutil"
 	dockertest "github.com/ory/dockertest/v3"
 )
+
+// TestInit_TLSRegistrationReusedForSameTLSConfig verifies re-init with the same TLS input refreshes registration without leaking state.
+func TestInit_TLSRegistrationReusedForSameTLSConfig(t *testing.T) {
+	ca := certhelpers.NewCert(
+		t,
+		certhelpers.CommonName("test-ca"),
+		certhelpers.IsCA(true),
+		certhelpers.SelfSign(),
+	)
+
+	registerCalls := 0
+	deregisterCalls := 0
+	registeredKeys := []string{}
+	deregisteredKeys := []string{}
+	registerTLSConfig := func(key string, cfg *tls.Config) error {
+		registerCalls++
+		registeredKeys = append(registeredKeys, key)
+		return nil
+	}
+	deregisterTLSConfig := func(key string) {
+		deregisterCalls++
+		deregisteredKeys = append(deregisteredKeys, key)
+	}
+
+	p := &mySQLConnectionProducer{registerTLSConfig: registerTLSConfig, deregisterTLSConfig: deregisterTLSConfig}
+	conf := map[string]interface{}{
+		"connection_url": "{{username}}:{{password}}@tcp(localhost:3306)/test",
+		"username":       "user",
+		"password":       "pass",
+		"tls_ca":         ca.Pem,
+	}
+
+	if _, err := p.Init(context.Background(), conf, false); err != nil {
+		t.Fatalf("first init failed: %s", err)
+	}
+	if _, err := p.Init(context.Background(), conf, false); err != nil {
+		t.Fatalf("second init failed: %s", err)
+	}
+
+	if registerCalls != 2 {
+		t.Fatalf("expected register to be called twice, got %d", registerCalls)
+	}
+	if deregisterCalls != 1 {
+		t.Fatalf("expected deregister to be called once, got %d", deregisterCalls)
+	}
+	if len(registeredKeys) != 2 || len(deregisteredKeys) != 1 {
+		t.Fatalf("unexpected key tracking sizes, registered=%d deregistered=%d", len(registeredKeys), len(deregisteredKeys))
+	}
+	if deregisteredKeys[0] != registeredKeys[0] {
+		t.Fatalf("expected deregistered key %q to match first registered key %q", deregisteredKeys[0], registeredKeys[0])
+	}
+	if deregisteredKeys[0] == registeredKeys[1] {
+		t.Fatalf("expected deregistered key to differ from newly registered replacement key")
+	}
+}
+
+// TestInit_TLSRegistrationRefreshedForChangedTLSConfig verifies TLS config re-init refreshes driver registration.
+func TestInit_TLSRegistrationRefreshedForChangedTLSConfig(t *testing.T) {
+	caA := certhelpers.NewCert(
+		t,
+		certhelpers.CommonName("test-ca-a"),
+		certhelpers.IsCA(true),
+		certhelpers.SelfSign(),
+	)
+	caB := certhelpers.NewCert(
+		t,
+		certhelpers.CommonName("test-ca-b"),
+		certhelpers.IsCA(true),
+		certhelpers.SelfSign(),
+	)
+
+	registerCalls := 0
+	deregisterCalls := 0
+	registeredKeys := []string{}
+	deregisteredKeys := []string{}
+	registerTLSConfig := func(key string, cfg *tls.Config) error {
+		registerCalls++
+		registeredKeys = append(registeredKeys, key)
+		return nil
+	}
+	deregisterTLSConfig := func(key string) {
+		deregisterCalls++
+		deregisteredKeys = append(deregisteredKeys, key)
+	}
+
+	p := &mySQLConnectionProducer{registerTLSConfig: registerTLSConfig, deregisterTLSConfig: deregisterTLSConfig}
+	base := map[string]interface{}{
+		"connection_url": "{{username}}:{{password}}@tcp(localhost:3306)/test",
+		"username":       "user",
+		"password":       "pass",
+	}
+
+	confA := map[string]interface{}{}
+	for k, v := range base {
+		confA[k] = v
+	}
+	confA["tls_ca"] = caA.Pem
+
+	confB := map[string]interface{}{}
+	for k, v := range base {
+		confB[k] = v
+	}
+	confB["tls_ca"] = caB.Pem
+
+	if _, err := p.Init(context.Background(), confA, false); err != nil {
+		t.Fatalf("first init failed: %s", err)
+	}
+	if _, err := p.Init(context.Background(), confB, false); err != nil {
+		t.Fatalf("second init failed: %s", err)
+	}
+
+	if registerCalls != 2 {
+		t.Fatalf("expected register to be called twice, got %d", registerCalls)
+	}
+	if deregisterCalls != 1 {
+		t.Fatalf("expected deregister to be called once, got %d", deregisterCalls)
+	}
+	if len(registeredKeys) != 2 || len(deregisteredKeys) != 1 {
+		t.Fatalf("unexpected key tracking sizes, registered=%d deregistered=%d", len(registeredKeys), len(deregisteredKeys))
+	}
+	if deregisteredKeys[0] != registeredKeys[0] {
+		t.Fatalf("expected deregistered key %q to match first registered key %q", deregisteredKeys[0], registeredKeys[0])
+	}
+	if deregisteredKeys[0] == registeredKeys[1] {
+		t.Fatalf("expected deregistered key to differ from newly registered replacement key")
+	}
+}
+
+// TestClose_DeregistersTLSConfig verifies Close deregisters any registered TLS config and is idempotent.
+func TestClose_DeregistersTLSConfig(t *testing.T) {
+	deregisterCalls := 0
+	deregisteredKeys := []string{}
+	deregisterTLSConfig := func(key string) {
+		deregisterCalls++
+		deregisteredKeys = append(deregisteredKeys, key)
+	}
+
+	testDB, err := sql.Open("mysql", "user:password@tcp(localhost:3306)/test")
+	if err != nil {
+		t.Fatalf("failed to create test DB handle: %s", err)
+	}
+
+	p := &mySQLConnectionProducer{tlsConfigName: "test-tls-key", db: testDB, deregisterTLSConfig: deregisterTLSConfig}
+	if err := p.Close(); err != nil {
+		t.Fatalf("close failed: %s", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("second close failed: %s", err)
+	}
+
+	if deregisterCalls != 1 {
+		t.Fatalf("expected deregister to be called once, got %d", deregisterCalls)
+	}
+	if len(deregisteredKeys) != 1 || deregisteredKeys[0] != "test-tls-key" {
+		t.Fatalf("expected deregistered key to be %q, got %v", "test-tls-key", deregisteredKeys)
+	}
+	if p.db != nil {
+		t.Fatalf("expected db to be cleared")
+	}
+	if p.tlsConfigName != "" {
+		t.Fatalf("expected tlsConfigName to be cleared")
+	}
+}
+
+// TestInit_NoTLSClearsPreviousTLSRegistration verifies re-init without TLS clears previous TLS registration.
+func TestInit_NoTLSClearsPreviousTLSRegistration(t *testing.T) {
+	ca := certhelpers.NewCert(
+		t,
+		certhelpers.CommonName("test-ca"),
+		certhelpers.IsCA(true),
+		certhelpers.SelfSign(),
+	)
+
+	registerCalls := 0
+	deregisterCalls := 0
+	registeredKeys := []string{}
+	deregisteredKeys := []string{}
+	registerTLSConfig := func(key string, cfg *tls.Config) error {
+		registerCalls++
+		registeredKeys = append(registeredKeys, key)
+		return nil
+	}
+	deregisterTLSConfig := func(key string) {
+		deregisterCalls++
+		deregisteredKeys = append(deregisteredKeys, key)
+	}
+
+	p := &mySQLConnectionProducer{registerTLSConfig: registerTLSConfig, deregisterTLSConfig: deregisterTLSConfig}
+	withTLS := map[string]interface{}{
+		"connection_url": "{{username}}:{{password}}@tcp(localhost:3306)/test",
+		"username":       "user",
+		"password":       "pass",
+		"tls_ca":         ca.Pem,
+	}
+	withoutTLS := map[string]interface{}{
+		"connection_url":      "{{username}}:{{password}}@tcp(localhost:3306)/test",
+		"username":            "user",
+		"password":            "pass",
+		"tls_ca":              "",
+		"tls_certificate_key": "",
+	}
+
+	if _, err := p.Init(context.Background(), withTLS, false); err != nil {
+		t.Fatalf("init with tls failed: %s", err)
+	}
+	if _, err := p.Init(context.Background(), withoutTLS, false); err != nil {
+		t.Fatalf("init without tls failed: %s", err)
+	}
+
+	if registerCalls != 1 {
+		t.Fatalf("expected register to be called once, got %d", registerCalls)
+	}
+	if deregisterCalls != 1 {
+		t.Fatalf("expected deregister to be called once, got %d", deregisterCalls)
+	}
+	if len(registeredKeys) != 1 || len(deregisteredKeys) != 1 {
+		t.Fatalf("unexpected key tracking sizes, registered=%d deregistered=%d", len(registeredKeys), len(deregisteredKeys))
+	}
+	if deregisteredKeys[0] != registeredKeys[0] {
+		t.Fatalf("expected deregistered key %q to match registered key %q", deregisteredKeys[0], registeredKeys[0])
+	}
+	if p.tlsConfigName != "" {
+		t.Fatalf("expected tlsConfigName to be cleared")
+	}
+}
+
+// TestEnsureTLSRegistration_ReplacementFailureKeepsPreviousRegistration verifies replacement failure preserves the prior TLS registration state.
+func TestEnsureTLSRegistration_ReplacementFailureKeepsPreviousRegistration(t *testing.T) {
+	registerCalls := 0
+	deregisterCalls := 0
+	registerTLSConfig := func(key string, cfg *tls.Config) error {
+		registerCalls++
+		return fmt.Errorf("forced register failure")
+	}
+	deregisterTLSConfig := func(key string) {
+		deregisterCalls++
+	}
+
+	p := &mySQLConnectionProducer{tlsConfigName: "existing-tls-key", registerTLSConfig: registerTLSConfig, deregisterTLSConfig: deregisterTLSConfig}
+	err := p.ensureTLSRegistration(&tls.Config{})
+	if err == nil {
+		t.Fatalf("expected ensureTLSRegistration to fail")
+	}
+
+	if registerCalls != 1 {
+		t.Fatalf("expected register to be called once, got %d", registerCalls)
+	}
+	if deregisterCalls != 0 {
+		t.Fatalf("expected deregister not to be called, got %d", deregisterCalls)
+	}
+	if p.tlsConfigName != "existing-tls-key" {
+		t.Fatalf("expected tlsConfigName to remain unchanged, got %q", p.tlsConfigName)
+	}
+}
 
 func Test_addTLStoDSN(t *testing.T) {
 	type testCase struct {
@@ -82,17 +337,20 @@ func TestInit_clientTLS(t *testing.T) {
 	defer os.RemoveAll(confDir)
 
 	// Create certificates for MySQL authentication
-	caCert := certhelpers.NewCert(t,
+	caCert := certhelpers.NewCert(
+		t,
 		certhelpers.CommonName("test certificate authority"),
 		certhelpers.IsCA(true),
 		certhelpers.SelfSign(),
 	)
-	serverCert := certhelpers.NewCert(t,
+	serverCert := certhelpers.NewCert(
+		t,
 		certhelpers.CommonName("server"),
 		certhelpers.DNS("localhost"),
 		certhelpers.Parent(caCert),
 	)
-	clientCert := certhelpers.NewCert(t,
+	clientCert := certhelpers.NewCert(
+		t,
 		certhelpers.CommonName("client"),
 		certhelpers.DNS("client"),
 		certhelpers.Parent(caCert),

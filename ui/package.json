@@ -29,6 +29,7 @@
     "fmt:styles": "prettier --write app/styles/**/*.*",
     "generate:form-config": "node --no-warnings scripts/generate-form-config.js",
     "start": "VAULT_ADDR=http://127.0.0.1:8200; pnpm build:jsondiffpatch && ember server --proxy=$VAULT_ADDR",
+    "start:dev": "VAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD) VAULT_COMMIT=$(git rev-parse --short HEAD) ember server --proxy=${VAULT_ADDR:-http://127.0.0.1:8200}",
     "start2": "pnpm build:jsondiffpatch && ember server --proxy=http://127.0.0.1:8202 --port=4202",
     "start:chroot": "ember server --proxy=http://127.0.0.1:8300 --port=4300",
     "lint": "concurrently --kill-others-on-fail -P -c \"auto\" -n lint:js,lint:hbs,lint:types \"pnpm:lint:js:quiet\" \"pnpm:lint:hbs:quiet\" \"pnpm:lint:types\"",
@@ -93,7 +94,7 @@
     "d3-shape": "~3.2.0",
     "date-fns": "~2.30.0",
     "date-fns-tz": "~1.3.8",
-    "dompurify": "~3.3.3",
+    "dompurify": "~3.4.15",
     "ember-a11y-testing": "~7.1.3",
     "ember-basic-dropdown": "~8.9.0",
     "ember-cli": "~5.8.1",
@@ -156,7 +157,7 @@
     "qunit": "~2.24.3",
     "qunit-dom": "~3.4.0",
     "sass": "^1.100.0",
-    "shell-quote": "~1.8.4",
+    "shell-quote": "^1.9.0",
     "sinon": "~20.0.0",
     "stylelint": "~16.19.1",
     "stylelint-config-standard": "~38.0.0",
@@ -200,6 +201,7 @@
     "@hashicorp/vault-client-typescript": "github:hashicorp/vault-client-typescript",
     "ember-auto-import": "2.10.0",
     "handlebars": "4.7.9",
+    "js-yaml": "^5.2.1",
     "posthog-js": "1.236.1",
     "uuid": "9.0.1"
   },
@@ -213,7 +215,8 @@
       "micromatch": "4.0.8",
       "rollup": "2.80.0",
       "@ember/test-waiters": "4.1.1",
-      "tmp": "0.2.6"
+      "tmp": "0.2.7",
+      "ws": "8.21.0"
     }
   },
   "packageManager": "pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c",

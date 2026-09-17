@@ -39,6 +39,10 @@ import (
 const (
 	RaftInitialChallengeLimit = 20 // allow an initial burst to 20
 	RaftChallengesPerSecond   = 5  // equating to an average 200ms min time
+	// Keep retry-join workers to a fixed bound so unauthenticated retry joins
+	// cannot grow goroutines without limit. 20 allows bounded parallel progress
+	// while capping memory/CPU impact from repeated requests.
+	raftMaxConcurrentRetryJoins = 20
 
 	// undoLogMonitorInterval is how often the leader checks to see
 	// if all the cluster members it knows about are new enough to support
@@ -1006,6 +1010,9 @@ func (c *Core) getRaftChallenge(leaderInfo *raft.LeaderJoinInfo) (*raftInformati
 	apiClient.ClearNamespace()
 
 	// Attempt to join the leader by requesting for the bootstrap challenge
+	// NOTE: We have investigated this as an SSRF vector and determined that it
+	// is not a risk. Any attacker would already need network access to this Vault node.
+	// An attacker would gain negligable information from a response.
 	secret, err := apiClient.Logical().Write("sys/storage/raft/bootstrap/challenge", map[string]interface{}{
 		"server_id": c.getRaftBackend().NodeID(),
 	})
@@ -1247,7 +1254,15 @@ func (c *Core) JoinRaftCluster(ctx context.Context, leaderInfos []*raft.LeaderJo
 
 	switch retryFailures {
 	case true:
+		select {
+		case c.raftJoinRetryLimiter <- struct{}{}:
+		default:
+			return false, errors.New("too many concurrent raft retry joins in progress")
+		}
 		go func() {
+			defer func() {
+				<-c.raftJoinRetryLimiter
+			}()
 			for {
 				select {
 				case <-ctx.Done():
