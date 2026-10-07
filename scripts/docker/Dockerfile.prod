@@ -1,0 +1,86 @@
+# Production image built entirely inside Docker: no Go, Node, pnpm or prebuilt
+# artifact from the host is used. Host build outputs (node_modules, dist, bin,
+# http/web_ui...) are kept out of the context by Dockerfile.prod.dockerignore.
+#
+#   docker buildx build -f scripts/docker/Dockerfile.prod \
+#     --build-arg REVISION=$(git rev-parse HEAD) \
+#     --platform linux/amd64 -t vault:$(cat version/VERSION) --load .
+
+# Higher than .go-version: plugins/vault-plugin-secrets-kv requires go >= 1.27.
+ARG GO_VERSION=1.27
+ARG NODE_VERSION=20
+
+## UI: builds the Ember application into http/web_ui
+FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-bookworm-slim AS ui
+
+ARG PNPM_VERSION=10.22.0
+ENV NODE_OPTIONS=--max-old-space-size=8192 \
+    JOBS=2 \
+    CI=true
+RUN npm install -g pnpm@${PNPM_VERSION}
+
+WORKDIR /src/ui
+COPY ui/pnpm-lock.yaml ui/pnpm-workspace.yaml ./
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm fetch
+
+COPY ui/ ./
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --offline --frozen-lockfile \
+ && mkdir -p ../http/web_ui \
+ && pnpm run build
+
+## Builder: compiles a static Vault binary embedding the UI
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS builder
+
+ARG TARGETOS TARGETARCH
+ARG REVISION=unknown
+ENV CGO_ENABLED=0 \
+    GOWORK=off \
+    GOOS=$TARGETOS \
+    GOARCH=$TARGETARCH
+
+WORKDIR /src
+COPY . .
+COPY --from=ui /src/http/web_ui ./http/web_ui
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    version=$(cat version/VERSION) \
+ && go build -trimpath -buildvcs=false -tags ui \
+      -ldflags "-s -w \
+        -X github.com/hashicorp/vault/version.GitCommit=${REVISION} \
+        -X github.com/hashicorp/vault/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+        -X github.com/hashicorp/vault/version.Version=${version}" \
+      -o /out/vault .
+
+## Final image, same layout as the "default" target of the root Dockerfile
+FROM alpine:3
+
+ARG REVISION=unknown
+LABEL name="Vault" \
+      revision=${REVISION} \
+      summary="Vault is a tool for securely accessing secrets."
+
+ENV NAME=vault
+
+RUN addgroup vault && adduser -S -G vault vault
+RUN apk add --upgrade --no-cache su-exec dumb-init tzdata
+
+COPY LICENSE /usr/share/doc/vault/LICENSE
+COPY --from=builder /out/vault /bin/vault
+
+RUN mkdir -p /vault/logs /vault/file /vault/config \
+ && chown -R vault:vault /vault
+
+VOLUME /vault/logs
+VOLUME /vault/file
+
+EXPOSE 8200
+
+# Run the container with --cap-add IPC_LOCK so that Vault can mlock memory.
+COPY .release/docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["docker-entrypoint.sh"]
+
+USER vault
+
+# Starts a server with the configuration found in /vault/config.
+CMD ["server"]

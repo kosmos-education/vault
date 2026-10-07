@@ -1,0 +1,13 @@
+# Keep every host-built artifact and dependency out of the build context.
+.git
+**/node_modules
+bin
+dist
+out
+pkg
+http/web_ui
+ui/dist
+ui/tmp
+ui/.pnpm-store
+website
+enos

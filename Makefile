@@ -5,7 +5,9 @@ THIS_FILE := $(lastword $(MAKEFILE_LIST))
 MAIN_PACKAGES=$$($(GO_CMD) list -tags enterprise ./... | grep -v vendor/ )
 SDK_PACKAGES=$$(cd $(CURDIR)/sdk && $(GO_CMD) list -tags enterprise ./... | grep -v vendor/ )
 API_PACKAGES=$$(cd $(CURDIR)/api && $(GO_CMD) list ./... | grep -v vendor/ )
-ALL_PACKAGES=$(MAIN_PACKAGES) $(SDK_PACKAGES) $(API_PACKAGES)
+VERSION_PACKAGES=$$(cd $(CURDIR)/version && $(GO_CMD) list ./... | grep -v vendor/ )
+INTERNALSHARED_PACKAGES=$$(cd $(CURDIR)/internalshared && $(GO_CMD) list -tags enterprise ./... | grep -v vendor/ )
+ALL_PACKAGES=$(MAIN_PACKAGES) $(SDK_PACKAGES) $(API_PACKAGES) $(VERSION_PACKAGES) $(INTERNALSHARED_PACKAGES)
 TEST=$$(echo $(ALL_PACKAGES) | grep -v integ/ )
 TEST_TIMEOUT?=45m
 EXTENDED_TEST_TIMEOUT=60m
@@ -22,7 +24,8 @@ ifeq ($(shell uname -s),Darwin)
 endif
 
 GO_VERSION_MIN=$$(cat $(CURDIR)/.go-version)
-GO_CMD?=go
+GO_ARCH_LOCAL=$$(go env GOARCH)
+GO_CMD?=GOWORK=off go
 CGO_ENABLED?=0
 ifneq ($(FDB_ENABLED), )
 	CGO_ENABLED=1
@@ -72,11 +75,11 @@ dev-dynamic-mem: dev-dynamic
 # Creates a Docker image by adding the compiled linux/amd64 binary found in ./bin.
 # The resulting image is tagged "vault:dev".
 docker-dev: BUILD_TAGS+=testonly
-docker-dev:
+docker-dev: prep
 	docker build --build-arg VERSION=$(GO_VERSION_MIN) --build-arg BUILD_TAGS="$(BUILD_TAGS)" -f scripts/docker/Dockerfile -t vault:dev .
 
 docker-dev-ui: BUILD_TAGS+=testonly
-docker-dev-ui:
+docker-dev-ui: prep
 	docker build --build-arg VERSION=$(GO_VERSION_MIN) --build-arg BUILD_TAGS="$(BUILD_TAGS)" -f scripts/docker/Dockerfile.ui -t vault:dev-ui .
 
 # test runs the unit tests and vets the code
@@ -170,8 +173,9 @@ protolint: prep check-tools-external
 	@echo "==> Linting protobufs..."
 	@buf lint
 
-# prep runs `go generate` to build the dynamically generated
-# source files.
+# prep runs `go generate` to build the dynamically generated source files.
+# Since generated files are committed to git, this is usually not needed.
+# Set SKIP_GEN=1 to skip generation (for savvy users who know they don't need it).
 #
 # n.b.: prep used to depend on fmtcheck, but since fmtcheck is
 # now run as a pre-commit hook (and there's little value in
