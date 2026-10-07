@@ -63,10 +63,16 @@ LABEL name="Vault" \
 ENV NAME=vault
 
 RUN addgroup vault && adduser -S -G vault vault
-RUN apk add --upgrade --no-cache su-exec dumb-init tzdata
+# libcap-setcap provides setcap, used by the entrypoint to grant IPC_LOCK.
+RUN apk add --upgrade --no-cache su-exec dumb-init tzdata libcap-setcap
 
 COPY LICENSE /usr/share/doc/vault/LICENSE
 COPY --from=builder /out/vault /bin/vault
+
+RUN mkdir -p /vault/logs && \
+    mkdir -p /vault/file && \
+    mkdir -p /vault/config && \
+    chown -R vault:vault /vault
 
 VOLUME /vault/logs
 VOLUME /vault/file
@@ -74,10 +80,12 @@ VOLUME /vault/file
 EXPOSE 8200
 
 # Run the container with --cap-add IPC_LOCK so that Vault can mlock memory.
+#
+# The container starts as root on purpose: the entrypoint chowns /vault/config
+# (bank-vaults writes vault.json there as root, mode 0600), sets the IPC_LOCK
+# file capability, then drops to the vault user with su-exec.
 COPY .release/docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 ENTRYPOINT ["docker-entrypoint.sh"]
-
-USER vault
 
 # Starts a server with the configuration found in /vault/config.
 CMD ["server"]
