@@ -68,9 +68,6 @@ RUN apk add --upgrade --no-cache su-exec dumb-init tzdata
 COPY LICENSE /usr/share/doc/vault/LICENSE
 COPY --from=builder /out/vault /bin/vault
 
-RUN mkdir -p /vault/logs /vault/file /vault/config \
- && chown -R vault:vault /vault
-
 VOLUME /vault/logs
 VOLUME /vault/file
 
