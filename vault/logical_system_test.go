@@ -34,12 +34,12 @@ import (
 	"github.com/hashicorp/vault/helper/constants"
 	"github.com/hashicorp/vault/helper/experiments"
 	"github.com/hashicorp/vault/helper/identity"
-	"github.com/hashicorp/vault/helper/namespace"
-	"github.com/hashicorp/vault/helper/random"
 	"github.com/hashicorp/vault/helper/testhelpers/corehelpers"
 	"github.com/hashicorp/vault/helper/testhelpers/pluginhelpers"
 	"github.com/hashicorp/vault/helper/versions"
 	"github.com/hashicorp/vault/internalshared/configutil"
+	"github.com/hashicorp/vault/internalshared/namespace"
+	"github.com/hashicorp/vault/internalshared/random"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/compressutil"
 	"github.com/hashicorp/vault/sdk/helper/consts"
@@ -6049,7 +6049,7 @@ func WalkLogicalStorage(ctx context.Context, store logical.Storage, walker walkF
 				if subkey == "" {
 					continue
 				}
-				subkey = fmt.Sprintf("%s%s", key, subkey)
+				subkey = key + subkey
 				keys = append(keys, subkey)
 			}
 		}
@@ -7093,7 +7093,7 @@ func TestGetSealBackendStatus(t *testing.T) {
 			testAccess, wrappers := seal.NewTestSeal(&tt.sealOpts)
 
 			c := TestCoreWithSeal(t, NewAutoSeal(testAccess), false)
-			_, keys, _ := TestCoreInitClusterWrapperSetup(t, c, nil)
+			_, keys, _ := TestCoreInitClusterWrapperSetup(t, c)
 			for _, key := range keys {
 				_, err := TestCoreUnseal(c, key)
 				require.NoError(t, err)
@@ -7160,7 +7160,7 @@ func TestGetSealBackendStatus(t *testing.T) {
 	shamirSeal := NewDefaultSeal(a)
 
 	c := TestCoreWithSeal(t, shamirSeal, false)
-	keys, _, _ := TestCoreInitClusterWrapperSetup(t, c, nil)
+	keys, _, _ := TestCoreInitClusterWrapperSetup(t, c)
 	for _, key := range keys {
 		_, err := TestCoreUnseal(c, key)
 		require.NoError(t, err)
@@ -7429,9 +7429,6 @@ func TestPathInternalUICustomMessagesCommon(t *testing.T) {
 func TestGetLeaderStatus_RedactionSettings(t *testing.T) {
 	testCluster := NewTestCluster(t, nil, nil)
 
-	testCluster.Start()
-	defer testCluster.Cleanup()
-
 	testCore := testCluster.Cores[0]
 
 	// Check with no redaction settings
@@ -7467,9 +7464,6 @@ func TestGetSealStatus_RedactionSettings(t *testing.T) {
 	testCluster := NewTestCluster(t, &CoreConfig{
 		ClusterName: "secret-cluster-name",
 	}, nil)
-
-	testCluster.Start()
-	defer testCluster.Cleanup()
 
 	testCore := testCluster.Cores[0]
 

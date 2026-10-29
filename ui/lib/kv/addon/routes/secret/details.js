@@ -26,6 +26,7 @@ export default class KvSecretDetailsRoute extends Route {
       const initOverride = params.version
         ? (context) => this.api.addQueryParams(context, { version: params.version })
         : undefined;
+
       const { data, metadata } = await this.api.secrets.kvV2Read(path, backend, undefined, initOverride);
       secret = { secretData: data, ...metadata };
     } catch (error) {

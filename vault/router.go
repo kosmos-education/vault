@@ -12,11 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/armon/go-metrics"
 	"github.com/armon/go-radix"
 	"github.com/hashicorp/go-hclog"
+	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/hashicorp/go-secure-stdlib/strutil"
-	"github.com/hashicorp/vault/helper/namespace"
+	"github.com/hashicorp/vault/internalshared/namespace"
 	"github.com/hashicorp/vault/sdk/helper/consts"
 	"github.com/hashicorp/vault/sdk/helper/salt"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -208,7 +208,11 @@ func (r *Router) Mount(backend logical.Backend, prefix string, mountEntry *Mount
 		storageView:   storageView,
 	}
 	re.tainted.Store(mountEntry.Tainted)
-	re.rootPaths.Store(pathsToRadix(paths.Root))
+	rootPathsEntry, err := parseSpecialPaths(paths.Root)
+	if err != nil {
+		return err
+	}
+	re.rootPaths.Store(rootPathsEntry)
 	loginPathsEntry, err := parseSpecialPaths(paths.Unauthenticated)
 	if err != nil {
 		return err
@@ -888,20 +892,35 @@ func (r *Router) RootPath(ctx context.Context, path string) bool {
 	remain := strings.TrimPrefix(adjustedPath, mount)
 
 	// Check the rootPaths of this backend
-	rootPaths := re.rootPaths.Load().(*radix.Tree)
-	match, raw, ok := rootPaths.LongestPrefix(remain)
-	if !ok {
+	rootPaths := re.rootPaths.Load().(*specialPathsEntry)
+	match, raw, ok := rootPaths.paths.LongestPrefix(remain)
+	if !ok && len(rootPaths.wildcardPaths) == 0 {
 		return false
 	}
-	prefixMatch := raw.(bool)
 
-	// Handle the prefix match case
-	if prefixMatch {
-		return strings.HasPrefix(remain, match)
+	if ok {
+		prefixMatch := raw.(bool)
+
+		// Handle the prefix match case
+		if prefixMatch {
+			return strings.HasPrefix(remain, match)
+		}
+
+		// Handle the exact match case
+		if match == remain {
+			return true
+		}
 	}
 
-	// Handle the exact match case
-	return match == remain
+	// Check root paths containing wildcards
+	reqPathParts := strings.Split(remain, "/")
+	for _, w := range rootPaths.wildcardPaths {
+		if pathMatchesWildcardPath(reqPathParts, w.segments, w.isPrefix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // LoginPath checks if the given path is used for logins

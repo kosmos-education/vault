@@ -11,12 +11,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/armon/go-metrics"
 	log "github.com/hashicorp/go-hclog"
+	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/hashicorp/go-secure-stdlib/strutil"
 	lru "github.com/hashicorp/golang-lru"
 	"github.com/hashicorp/vault/helper/identity"
-	"github.com/hashicorp/vault/helper/namespace"
+	"github.com/hashicorp/vault/internalshared/namespace"
 	"github.com/hashicorp/vault/sdk/helper/consts"
 	"github.com/hashicorp/vault/sdk/helper/policyutil"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -168,7 +168,7 @@ path "identity/oidc/provider/+/authorize" {
 	// defaultCeilingPolicy is the default ceiling policy.
 	defaultCeilingPolicy = `
 # Allow an entity to inspect its own registration information
-path "agent-registry/registration/entity_id/{{identity.entity.id}}" {
+path "agent-registry/registration/entity-id/{{identity.entity.id}}" {
   capabilities = ["read"]
 }
 

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hashicorp/vault/helper/namespace"
 	"github.com/hashicorp/vault/helper/versions"
+	"github.com/hashicorp/vault/internalshared/namespace"
 	"github.com/hashicorp/vault/sdk/helper/consts"
 	"github.com/hashicorp/vault/sdk/logical"
 )
@@ -81,8 +81,7 @@ func TestDisplayNameTemplateWarning(t *testing.T) {
 }
 
 func TestWriteConfig_PluginVersionInStorage(t *testing.T) {
-	cluster, sys := getCluster(t)
-	t.Cleanup(cluster.Cleanup)
+	_, sys := getCluster(t)
 
 	config := logical.TestBackendConfig()
 	config.StorageView = &logical.InmemStorage{}
@@ -193,8 +192,7 @@ func TestWriteConfig_PluginVersionInStorage(t *testing.T) {
 }
 
 func TestWriteConfig_HelpfulErrorMessageWhenBuiltinOverridden(t *testing.T) {
-	cluster, sys := getClusterPostgresDB(t)
-	t.Cleanup(cluster.Cleanup)
+	_, sys := getClusterPostgresDB(t)
 
 	config := logical.TestBackendConfig()
 	config.StorageView = &logical.InmemStorage{}

@@ -1,4 +1,4 @@
-// Copyright IBM Corp. 2016, 2025
+// Copyright IBM Corp. 2016, 2026
 // SPDX-License-Identifier: BUSL-1.1
 
 package cmd
@@ -49,7 +49,7 @@ func runCopyGithubPullRequestCmd(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Println(string(b))
 	case "markdown":
-		tbl := res.ToTable(err)
+		tbl := res.ToMarkdownTable(err)
 		tbl.SetTitle("Copy Pull Request")
 		fmt.Println(tbl.RenderMarkdown())
 	default:

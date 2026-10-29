@@ -46,7 +46,7 @@ import (
 func TestAcmeBasicWorkflow(t *testing.T) {
 	t.Parallel()
 	cluster, client, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
+
 	cases := []struct {
 		name      string
 		prefixUrl string
@@ -359,7 +359,7 @@ func TestAcmeBasicWorkflow(t *testing.T) {
 func TestAcmeBasicWorkflowWithEab(t *testing.T) {
 	t.Parallel()
 	cluster, client, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
+
 	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -478,8 +478,7 @@ func TestAcmeBasicWorkflowWithEab(t *testing.T) {
 // based on the
 func TestAcmeNonce(t *testing.T) {
 	t.Parallel()
-	cluster, client, pathConfig := setupAcmeBackend(t)
-	defer cluster.Cleanup()
+	_, client, pathConfig := setupAcmeBackend(t)
 
 	cases := []struct {
 		name         string
@@ -536,8 +535,7 @@ func TestAcmeNonce(t *testing.T) {
 // TestAcmeClusterPathNotConfigured basic testing of the ACME error handler.
 func TestAcmeClusterPathNotConfigured(t *testing.T) {
 	t.Parallel()
-	cluster, client := setupTestPkiCluster(t)
-	defer cluster.Cleanup()
+	_, client := setupTestPkiCluster(t)
 
 	// Go sneaky, sneaky and update the acme configuration through sys/raw to bypass config/cluster path checks
 	pkiMount := findStorageMountUuid(t, client, "pki")
@@ -591,7 +589,6 @@ func TestAcmeClusterPathNotConfigured(t *testing.T) {
 func TestAcmeAccountsCrossingDirectoryPath(t *testing.T) {
 	t.Parallel()
 	cluster, _, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
 
 	baseAcmeURL := "/v1/pki/acme/"
 	accountKey, err := cryptoutil.GenerateRSAKey(rand.Reader, 2048)
@@ -620,7 +617,6 @@ func TestAcmeAccountsCrossingDirectoryPath(t *testing.T) {
 func TestAcmeEabCrossingDirectoryPath(t *testing.T) {
 	t.Parallel()
 	cluster, client, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
 
 	// Enable EAB
 	_, err := client.Logical().WriteWithContext(context.Background(), "pki/config/acme", map[string]interface{}{
@@ -657,7 +653,6 @@ func TestAcmeDisabledWithEnvVar(t *testing.T) {
 	// Setup a cluster with the configuration set to not-required, initially as the
 	// configuration will validate if the environment var is set
 	cluster, client, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
 
 	// Seal setup the environment variable, and unseal which now means we have a cluster
 	// with ACME configuration saying it is enabled with a bad EAB policy.
@@ -682,8 +677,7 @@ func TestAcmeDisabledWithEnvVar(t *testing.T) {
 // TestAcmeConfigChecksPublicAcmeEnv verifies certain EAB policy values can not be set if ENV var is enabled
 func TestAcmeConfigChecksPublicAcmeEnv(t *testing.T) {
 	t.Setenv("VAULT_DISABLE_PUBLIC_ACME", "true")
-	cluster, client := setupTestPkiCluster(t)
-	defer cluster.Cleanup()
+	_, client := setupTestPkiCluster(t)
 
 	_, err := client.Logical().WriteWithContext(context.Background(), "pki/config/cluster", map[string]interface{}{
 		"path": "https://dadgarcorp.com/v1/pki",
@@ -718,7 +712,6 @@ func TestAcmeHonorsAlwaysEnforceErr(t *testing.T) {
 	t.Parallel()
 
 	cluster, client, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
 
 	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -798,7 +791,6 @@ func TestAcmeTruncatesToIssuerExpiry(t *testing.T) {
 	t.Parallel()
 
 	cluster, client, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
 
 	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -888,7 +880,6 @@ func TestAcmeRoleExtKeyUsage(t *testing.T) {
 	t.Parallel()
 
 	cluster, client, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
 
 	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -992,7 +983,6 @@ func TestIssuerRoleDirectoryAssociations(t *testing.T) {
 	// roles (test-role, acme) that we can use with various directory
 	// configurations.
 	cluster, client, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
 
 	// Setup DNS for validations.
 	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -1127,7 +1117,6 @@ func TestACMESubjectFieldsAndExtensionsIgnored(t *testing.T) {
 	// roles (test-role, acme) that we can use with various directory
 	// configurations.
 	cluster, client, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
 
 	// Setup DNS for validations.
 	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -1176,7 +1165,6 @@ func TestAcmeWithCsrIncludingBasicConstraintExtension(t *testing.T) {
 	t.Parallel()
 
 	cluster, client, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
 
 	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -1508,7 +1496,6 @@ func testAcmeCertSignedByCa(t *testing.T, client *api.Client, derCerts [][]byte,
 func TestAcmeValidationError(t *testing.T) {
 	t.Parallel()
 	cluster, _, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
 
 	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -1617,7 +1604,7 @@ func TestAcmeRevocationAcrossAccounts(t *testing.T) {
 	t.Parallel()
 
 	cluster, vaultClient, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
+
 	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -1753,7 +1740,6 @@ func TestAcmeRevokeReasonCode(t *testing.T) {
 func TestAcmeMaxTTL(t *testing.T) {
 	t.Parallel()
 	cluster, client, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
 
 	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -1838,7 +1824,7 @@ func TestAcmeMaxTTL(t *testing.T) {
 func TestVaultOperatorACMEDisableWorkflow(t *testing.T) {
 	t.Parallel()
 	cluster, vaultClient, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
+
 	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -1979,14 +1965,13 @@ func setupTestPkiCluster(t *testing.T) (*vault.TestCluster, *api.Client) {
 	cluster := vault.NewTestCluster(t, coreConfig, &vault.TestClusterOptions{
 		HandlerFunc: vaulthttp.Handler,
 	})
-	cluster.Start()
 	client := cluster.Cores[0].Client
 	mountPKIEndpoint(t, client, "pki")
 	return cluster, client
 }
 
 func getAcmeClientForCluster(t *testing.T, cluster *vault.TestCluster, baseUrl string, key crypto.Signer) *acme.Client {
-	coreAddr := cluster.Cores[0].Listeners[0].Address
+	coreAddr := cluster.Cores[0].APIAddress()
 	tlsConfig := cluster.Cores[0].TLSConfig()
 
 	transport := cleanhttp.DefaultPooledTransport()
@@ -2038,7 +2023,6 @@ func getEABKey(t *testing.T, client *api.Client, baseUrl string) (string, []byte
 
 func TestACMEClientRequestLimits(t *testing.T) {
 	cluster, client, _ := setupAcmeBackend(t)
-	defer cluster.Cleanup()
 
 	cases := []struct {
 		name           string

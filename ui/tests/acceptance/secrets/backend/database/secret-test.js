@@ -536,7 +536,7 @@ module('Acceptance | secrets/database/*', function (hooks) {
     // Check with restricted permissions
     await login(token);
     await click(GENERAL.navLink('Secrets'));
-    assert.dom(GENERAL.listItem(`${backend}/`)).exists('Shows backend on secret list page');
+    assert.dom(GENERAL.linkTo(`${backend}/`)).exists('Shows backend on secret list page');
     await navToConnection(backend, connection);
     assert.strictEqual(
       currentURL(),
@@ -556,7 +556,9 @@ module('Acceptance | secrets/database/*', function (hooks) {
     assert
       .dom('[data-test-overview-card="Roles"]')
       .doesNotExist('Roles card does not exist on overview w/ policy');
-    assert.dom('.overview-card h2').hasText('1', 'Lists the correct number of connections');
+    assert
+      .dom('[data-test-overview-card-content="Connections"]')
+      .hasText('1', 'Lists the correct number of connections');
     // confirm get credentials card is an option to select. Regression bug.
     await typeIn(GENERAL.inputSearch('search-input-role'), 'blah');
     assert.dom(GENERAL.button('Get credentials')).isEnabled();
@@ -617,7 +619,7 @@ module('Acceptance | secrets/database/*', function (hooks) {
       path "${backend}/static-roles/*" {
         capabilities = ["delete"]
       }
-      path "${backend}/config/*" {
+      path "${backend}/config" {
         capabilities = ["list", "create", "read", "update"]
       }
       path "${backend}/creds/*" {
@@ -644,10 +646,7 @@ module('Acceptance | secrets/database/*', function (hooks) {
     assert
       .dom('[data-test-secret-list-tab="Roles"]')
       .doesNotExist(`does not show the roles tab because it does not have permissions`);
-    assert
-      .dom('[data-test-overview-card="Connections"]')
-      .exists({ count: 1 }, 'renders only the connection card');
-    await click('[data-test-action-text="Configure new"]');
+    await click(SES.createSecretLink);
     assert.strictEqual(currentURL(), `/vault/secrets-engines/${backend}/create?itemType=connection`);
   });
 });

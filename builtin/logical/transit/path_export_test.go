@@ -110,7 +110,11 @@ func verifyExportsCorrectVersion(t *testing.T, exportType, keyType, parameterSet
 			req.Data["parameter_set"] = parameterSet
 		}
 		if ecKeyType != "" {
-			req.Data["hybrid_key_type_pqc"] = "ml-dsa"
+			pqcKeyType := "ml-dsa"
+			if strings.HasPrefix(parameterSet, "slh-dsa") {
+				pqcKeyType = "slh-dsa"
+			}
+			req.Data["hybrid_key_type_pqc"] = pqcKeyType
 			req.Data["hybrid_key_type_ec"] = ecKeyType
 		}
 		if keyType == "hmac" {
@@ -526,12 +530,7 @@ func TestTransit_Export_CertificateChain(t *testing.T) {
 	cluster := vault.NewTestCluster(t, coreConfig, &vault.TestClusterOptions{
 		HandlerFunc: vaulthttp.Handler,
 	})
-
-	cluster.Start()
-	defer cluster.Cleanup()
-
 	cores := cluster.Cores
-	vault.TestWaitActive(t, cores[0].Core)
 	client := cores[0].Client
 
 	// Mount transit backend

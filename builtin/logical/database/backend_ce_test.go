@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/go-test/deep"
-	"github.com/hashicorp/vault/helper/namespace"
 	postgreshelper "github.com/hashicorp/vault/helper/testhelpers/postgresql"
+	"github.com/hashicorp/vault/internalshared/namespace"
 	"github.com/hashicorp/vault/sdk/database/helper/dbutil"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -28,9 +28,7 @@ func TestBackend_config_connection(t *testing.T) {
 	var resp *logical.Response
 	var err error
 
-	cluster, sys := getClusterPostgresDB(t)
-	defer cluster.Cleanup()
-
+	_, sys := getClusterPostgresDB(t)
 	config := logical.TestBackendConfig()
 	config.StorageView = &logical.InmemStorage{}
 	config.System = sys
@@ -254,7 +252,6 @@ func TestBackend_connectionCrud(t *testing.T) {
 	t.Parallel()
 	dbFactory := &singletonDBFactory{}
 	cluster, sys := getClusterPostgresDBWithFactory(t, dbFactory.factory)
-	defer cluster.Cleanup()
 
 	dbFactory.sys = sys
 	client := cluster.Cores[0].Client.Logical()

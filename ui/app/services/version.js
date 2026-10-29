@@ -57,6 +57,11 @@ export default class VersionService extends Service {
     return this.features.includes('Consumption Billing');
   }
 
+  // Agent Registry requires either the platform-standard or agentic-iam license module.
+  get hasAgenticIam() {
+    return this.features.includes('Agentic IAM');
+  }
+
   get hasSecretsSync() {
     const isEnterprise = this.isEnterprise;
     const isHvdManaged = this.flags.isHvdManaged;

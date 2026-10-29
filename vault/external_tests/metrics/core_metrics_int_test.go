@@ -30,13 +30,7 @@ func TestMountTableMetrics(t *testing.T) {
 		NumCores:               2,
 		CoreMetricSinkProvider: testhelpers.TestMetricSinkProvider(time.Minute),
 	})
-
-	cluster.Start()
-	defer cluster.Cleanup()
-
-	// Wait for core to become active
 	cores := cluster.Cores
-	vault.TestWaitActive(t, cores[0].Core)
 
 	client := cores[0].Client
 
@@ -47,7 +41,7 @@ func TestMountTableMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	nonlocalLogicalMountsize, err := gaugeSearchHelper(data, 4)
+	nonlocalLogicalMountsize, err := gaugeSearchHelper(data, 3)
 	if err != nil {
 		t.Error(err.Error())
 	}
@@ -67,7 +61,7 @@ func TestMountTableMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	nonlocalLogicalMountsizeAfterMount, err := gaugeSearchHelper(data, 5)
+	nonlocalLogicalMountsizeAfterMount, err := gaugeSearchHelper(data, 4)
 	if err != nil {
 		t.Error(err.Error())
 	}
@@ -120,13 +114,7 @@ func TestLeaderReElectionMetrics(t *testing.T) {
 		NumCores:               2,
 		CoreMetricSinkProvider: testhelpers.TestMetricSinkProvider(time.Minute),
 	})
-
-	cluster.Start()
-	defer cluster.Cleanup()
-
-	// Wait for core to become active
 	cores := cluster.Cores
-	vault.TestWaitActive(t, cores[0].Core)
 
 	client := cores[0].Client
 	standbyClient := cores[1].Client

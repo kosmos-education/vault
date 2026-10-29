@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/hashicorp/vault/helper/identity"
-	"github.com/hashicorp/vault/helper/namespace"
-	"github.com/hashicorp/vault/helper/random"
+	"github.com/hashicorp/vault/internalshared/namespace"
+	"github.com/hashicorp/vault/internalshared/random"
 	"github.com/hashicorp/vault/sdk/helper/consts"
 	"github.com/hashicorp/vault/sdk/helper/license"
 	"github.com/hashicorp/vault/sdk/helper/pluginutil"
@@ -388,7 +388,7 @@ func (d dynamicSystemView) RegisterRotationJobWithResponse(ctx context.Context, 
 		return nil, fmt.Errorf("error configuring rotation job: %s", err)
 	}
 
-	// Set the MountPoint here from the mountEntry so plugins cannot force-set a mount point other than its own
+	// Set the MountPoint here from the mountEntry so plugins cannot force-set a mount point other than its own.
 	job.MountPoint = mountEntry.APIPath()
 
 	resp, err := d.core.RegisterRotationJob(nsCtx, job)

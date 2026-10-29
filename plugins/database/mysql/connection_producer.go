@@ -27,6 +27,13 @@ const (
 	driverMySQL   = "mysql"
 )
 
+var (
+	// These aliases call the production MySQL driver TLS registry functions and
+	// allow tests to stub registration/deregistration behavior.
+	registerMySQLTLSConfig   = mysql.RegisterTLSConfig
+	deregisterMySQLTLSConfig = mysql.DeregisterTLSConfig
+)
+
 // mySQLConnectionProducer implements ConnectionProducer and provides a generic producer for most sql databases
 type mySQLConnectionProducer struct {
 	ConnectionURL            string      `json:"connection_url"          mapstructure:"connection_url"          structs:"connection_url"`
@@ -248,17 +255,6 @@ func (c *mySQLConnectionProducer) Close() error {
 }
 
 func (c *mySQLConnectionProducer) ensureTLSRegistration(tlsConfig *tls.Config) error {
-	registerTLSConfig := c.registerTLSConfig
-	if registerTLSConfig == nil {
-		// Default to production mysql driver registration.
-		registerTLSConfig = mysql.RegisterTLSConfig
-	}
-	deregisterTLSConfig := c.deregisterTLSConfig
-	if deregisterTLSConfig == nil {
-		// Default to production mysql driver deregistration.
-		deregisterTLSConfig = mysql.DeregisterTLSConfig
-	}
-
 	if tlsConfig == nil {
 		c.clearTLSRegistration()
 		return nil
@@ -272,28 +268,23 @@ func (c *mySQLConnectionProducer) ensureTLSRegistration(tlsConfig *tls.Config) e
 		return fmt.Errorf("unable to generate UUID for TLS configuration: %w", err)
 	}
 
-	if err := registerTLSConfig(nextTLSConfigName, tlsConfig); err != nil {
+	if err := registerMySQLTLSConfig(nextTLSConfigName, tlsConfig); err != nil {
 		return fmt.Errorf("unable to register TLS config: %w", err)
 	}
 
 	c.tlsConfigName = nextTLSConfigName
 	if previousTLSConfigName != "" {
-		deregisterTLSConfig(previousTLSConfigName)
+		deregisterMySQLTLSConfig(previousTLSConfigName)
 	}
 	return nil
 }
 
 func (c *mySQLConnectionProducer) clearTLSRegistration() {
-	deregisterTLSConfig := c.deregisterTLSConfig
-	if deregisterTLSConfig == nil {
-		deregisterTLSConfig = mysql.DeregisterTLSConfig
-	}
-
 	if c.tlsConfigName == "" {
 		return
 	}
 
-	deregisterTLSConfig(c.tlsConfigName)
+	deregisterMySQLTLSConfig(c.tlsConfigName)
 
 	c.tlsConfigName = ""
 }

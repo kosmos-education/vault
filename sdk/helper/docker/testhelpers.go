@@ -253,13 +253,7 @@ func (d *Runner) StartNewService(ctx context.Context, addSuffix, forceLocalAddr 
 
 	cleanup := func(ctx context.Context) {
 		for i := 0; i < 10; i++ {
-			// It seems podman does a STOP, then waits 10s, and then resorts to KILL.
-			// We don't have that patience, so we'll just start with a KILL.
-			_, _ = d.DockerAPI.ContainerKill(ctx, result.Container.ID, client.ContainerKillOptions{})
-			_, err := d.DockerAPI.ContainerRemove(ctx, result.Container.ID, client.ContainerRemoveOptions{
-				RemoveVolumes: true,
-				Force:         true,
-			})
+			_, err := d.DockerAPI.ContainerRemove(ctx, result.Container.ID, client.ContainerRemoveOptions{Force: true})
 			if err == nil || errdefs.IsNotFound(err) {
 				return
 			}

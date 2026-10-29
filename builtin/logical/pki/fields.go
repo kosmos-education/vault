@@ -9,17 +9,19 @@ import (
 	"github.com/hashicorp/go-secure-stdlib/strutil"
 	"github.com/hashicorp/vault/builtin/logical/pki/issuing"
 	"github.com/hashicorp/vault/sdk/framework"
+	"github.com/hashicorp/vault/sdk/helper/certutil"
 	"software.sslmate.com/src/go-pkcs12"
 )
 
 const (
-	issuerRefParam = "issuer_ref"
-	keyNameParam   = "key_name"
-	keyRefParam    = "key_ref"
-	keyIdParam     = "key_id"
-	keyTypeParam   = "key_type"
-	keyBitsParam   = "key_bits"
-	skidParam      = "subject_key_id"
+	issuerRefParam    = "issuer_ref"
+	keyNameParam      = "key_name"
+	keyRefParam       = "key_ref"
+	keyIdParam        = "key_id"
+	keyTypeParam      = "key_type"
+	keyBitsParam      = "key_bits"
+	skidParam         = "subject_key_id"
+	parameterSetParam = "parameter_set"
 )
 
 // addIssueAndSignCommonFields adds fields common to both CA and non-CA issuing
@@ -79,9 +81,9 @@ pkcs8 instead. Defaults to "der".`,
 		fields["pkcs12_encoder"] = &framework.FieldSchema{
 			Type:    framework.TypeString,
 			Default: "modern2026",
-			Description: `Encoder profile to use for PKCS#12 archives when
-format is set to "pkcs12_bundle". Valid values are "modern2026" and
-"modern2023". Defaults to "modern2026", which uses the newer PKCS#12
+			Description: `Encoder profile to use for PKCS#12 archives when 
+format is set to "pkcs12_bundle". Valid values are "modern2026" and 
+"modern2023". Defaults to "modern2026", which uses the newer PKCS#12 
 integrity format (PBMAC1).`,
 			AllowedValues: []interface{}{"modern2026", "modern2023"},
 			DisplayAttrs: &framework.DisplayAttributes{
@@ -92,8 +94,8 @@ integrity format (PBMAC1).`,
 		fields["pkcs12_password"] = &framework.FieldSchema{
 			Type:    framework.TypeString,
 			Default: pkcs12.DefaultPassword,
-			Description: `Password for encrypting the PKCS#12
-		archive when format is set to "pkcs12_bundle". If not provided,
+			Description: `Password for encrypting the PKCS#12 
+		archive when format is set to "pkcs12_bundle". If not provided, 
 		defaults to "changeit". It is recommended to use the default password
 		and protect the file using other means or use a high-entropy password.`,
 			DisplayAttrs: &framework.DisplayAttributes{
@@ -107,7 +109,7 @@ integrity format (PBMAC1).`,
 			Type:    framework.TypeString,
 			Default: pkcs12.DefaultPassword,
 			Description: `Password for encrypting the Java keystore
-		when format is set to "jks_bundle". If not provided,
+		when format is set to "jks_bundle". If not provided, 
 		defaults to "changeit". It is recommended to use the default password
 		and protect the file using other means or use a high-entropy password.`,
 			DisplayAttrs: &framework.DisplayAttributes{
@@ -416,10 +418,17 @@ RSA key-type issuer. Defaults to false.`,
 		Default: "rsa",
 		Description: `The type of key to use; defaults to RSA. "rsa"
 "ec" and "ed25519" are the only valid values.`,
-		AllowedValues: []interface{}{"rsa", "ec", "ed25519"},
+		AllowedValues: []interface{}{"rsa", "ec", "ed25519", "ml-dsa"},
 		DisplayAttrs: &framework.DisplayAttributes{
 			Value: "rsa",
 		},
+	}
+
+	fields[parameterSetParam] = &framework.FieldSchema{
+		Type:          framework.TypeString,
+		Default:       certutil.MLDSA44,
+		Description:   `The parameter set to use for ML-DSA keys; defaults to ml-dsa-44. Valid values are ml-dsa-44, ml-dsa-65, and ml-dsa-87`,
+		AllowedValues: []interface{}{certutil.MLDSA44, certutil.MLDSA65, certutil.MLDSA87},
 	}
 
 	fields = addKeyRefNameFields(fields)

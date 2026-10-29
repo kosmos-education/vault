@@ -10,14 +10,22 @@ import Component from '@glimmer/component';
 import { WIZARD_ID_MAP } from 'vault/utils/constants/wizard';
 import errorMessage from 'vault/utils/error-message';
 import { PolicyTypes } from 'core/utils/code-generators/policy';
+import { INTRO_REOPEN_CLICKED } from 'vault/utils/analytic-events';
 
+import type AnalyticsService from 'vault/services/analytics';
 import type ApiService from 'vault/services/api';
 import type FlashMessageService from 'vault/services/flash-messages';
 import type NamespaceService from 'vault/services/namespace';
 import type RouterService from '@ember/routing/router-service';
 import type WizardService from 'vault/services/wizard';
-import type PolicyModel from 'vault/vault/models/policy';
 import type { PaginatedMetadata } from 'core/utils/paginate-list';
+
+interface PolicyModel {
+  name: string;
+  policy: string;
+  capabilities: object;
+  policyType: string;
+}
 
 interface Args {
   filter: string | null;
@@ -27,6 +35,7 @@ interface Args {
 }
 
 export default class PagePoliciesComponent extends Component<Args> {
+  @service declare readonly analytics: AnalyticsService;
   @service declare readonly api: ApiService;
   @service declare readonly router: RouterService;
   @service declare readonly flashMessages: FlashMessageService;
@@ -62,7 +71,7 @@ export default class PagePoliciesComponent extends Component<Args> {
   get filterMatchesKey(): boolean {
     const filter = this.filter;
     const content = this.args.model;
-    return !!(content && content.length && content.find((c: PolicyModel) => c['id'] === filter));
+    return !!(content && content.length && content.find((c: PolicyModel) => c['name'] === filter));
   }
 
   // Find the first policy that partially matches the filter (starts with filter)
@@ -77,7 +86,7 @@ export default class PagePoliciesComponent extends Component<Args> {
     return filterMatchesKey
       ? undefined
       : content.find((key: PolicyModel) => {
-          return re.test(key['id'] as string);
+          return re.test(key['name'] as string);
         });
   }
 
@@ -152,6 +161,13 @@ export default class PagePoliciesComponent extends Component<Args> {
 
   @action
   showIntroPage() {
+    this.analytics.trackEvent(INTRO_REOPEN_CLICKED, {
+      namespace: 'intro-page',
+      action: 'clicked',
+      elementId: 'intro-reopen-button',
+      channel: 'webpage',
+      objectType: 'acl-policy',
+    });
     // Reset the wizard dismissal state to allow re-entering the wizard
     this.wizard.reset(this.wizardId);
     this.shouldRenderIntroModal = true;

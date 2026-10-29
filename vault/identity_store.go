@@ -6,25 +6,26 @@ package vault
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strings"
 	"time"
 
-	"github.com/armon/go-metrics"
 	"github.com/golang/protobuf/ptypes"
 	log "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-memdb"
+	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/hashicorp/go-secure-stdlib/strutil"
 	"github.com/hashicorp/vault/helper/identity"
-	"github.com/hashicorp/vault/helper/metricsutil"
-	"github.com/hashicorp/vault/helper/namespace"
 	"github.com/hashicorp/vault/helper/storagepacker"
 	"github.com/hashicorp/vault/helper/versions"
+	"github.com/hashicorp/vault/internalshared/metricsutil"
+	"github.com/hashicorp/vault/internalshared/namespace"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/consts"
 	"github.com/hashicorp/vault/sdk/helper/locksutil"
 	"github.com/hashicorp/vault/sdk/logical"
-	"github.com/patrickmn/go-cache"
+	ttlcache "github.com/jellydator/ttlcache/v3"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -33,6 +34,8 @@ import (
 const (
 	groupBucketsPrefix        = "packer/group/buckets/"
 	localAliasesBucketsPrefix = "packer/local-aliases/buckets/"
+	tpmBucketsPrefix          = "packer/tpm/buckets/"
+	tpmgroupBucketsPrefix     = "packer/tpmgroup/buckets/"
 )
 
 var (
@@ -51,10 +54,11 @@ func (i *IdentityStore) GetDisableLowerCasedNames() bool {
 	return i.disableLowerCasedNames
 }
 
+// SetDisableLowerCasedNames sets that value to true for external tests to access. It is false by default
 func (i *IdentityStore) SetDisableLowerCasedNames() {
 	i.lock.Lock()
-	defer i.lock.Unlock()
 	i.disableLowerCasedNames = true
+	i.lock.Unlock()
 }
 
 // resetDB callers must hold the write lock on i.lock before calling, to ensure
@@ -71,6 +75,10 @@ func (i *IdentityStore) resetDB() error {
 	return nil
 }
 
+func (i *IdentityStore) Cleanup(context.Context) {
+	i.oidcAuthCodeCache.c.Stop()
+}
+
 func NewIdentityStore(ctx context.Context, core *Core, config *logical.BackendConfig, logger log.Logger) (*IdentityStore, error) {
 	iStore := &IdentityStore{
 		view:                            config.StorageView,
@@ -85,8 +93,8 @@ func NewIdentityStore(ctx context.Context, core *Core, config *logical.BackendCo
 		tokenStorer:                     core,
 		entityCreator:                   core,
 		mountLister:                     core,
-		billingCounter:                  core,
 		syntheticAliasAccessorValidator: core,
+		billingCounter:                  core,
 		mfaBackend:                      core.loginMFABackend,
 		aliasLocks:                      locksutil.CreateLocks(),
 		activationManager:               core.FeatureActivationFlags,
@@ -123,6 +131,20 @@ func NewIdentityStore(ctx context.Context, core *Core, config *logical.BackendCo
 		return nil, fmt.Errorf("failed to create group packer: %w", err)
 	}
 
+	tpmsPackerLogger := iStore.logger.Named("storagepacker").Named("tpms")
+	core.AddLogger(tpmsPackerLogger)
+	iStore.tpmPacker, err = storagepacker.NewStoragePacker(iStore.view, tpmsPackerLogger, tpmBucketsPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tpm packer: %w", err)
+	}
+
+	tpmgroupsPackerLogger := iStore.logger.Named("storagepacker").Named("tpmgroups")
+	core.AddLogger(tpmgroupsPackerLogger)
+	iStore.tpmgroupPacker, err = storagepacker.NewStoragePacker(iStore.view, tpmgroupsPackerLogger, tpmgroupBucketsPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tpmgroup packer: %w", err)
+	}
+
 	unauthenticatedPaths := []string{
 		"oidc/.well-known/*",
 		"oidc/+/.well-known/*",
@@ -156,8 +178,8 @@ func NewIdentityStore(ctx context.Context, core *Core, config *logical.BackendCo
 		RunningVersion: versions.DefaultBuiltinVersion,
 	}
 
-	iStore.oidcCache = newOIDCCache(cache.NoExpiration, cache.NoExpiration)
-	iStore.oidcAuthCodeCache = newOIDCCache(5*time.Minute, 5*time.Minute)
+	iStore.oidcCache = newOIDCCache(ctx, ttlcache.NoTTL, core.synctest)
+	iStore.oidcAuthCodeCache = newOIDCCache(ctx, 5*time.Minute, core.synctest)
 
 	err = iStore.Setup(ctx, config)
 	if err != nil {
@@ -187,6 +209,8 @@ func (i *IdentityStore) paths() []*framework.Path {
 		mfaLoginEnforcementPaths(i),
 		mfaLoginEnterprisePaths(i),
 		scimPaths(i),
+		tpmPaths(i),
+		tpmgroupPaths(i),
 	)
 }
 
@@ -222,6 +246,23 @@ func mfaCommonPaths(i *IdentityStore) []*framework.Path {
 				logical.ListOperation: &framework.PathOperation{
 					Callback: i.handleMFAMethodListGlobal,
 					Summary:  "List MFA method configurations for all MFA methods",
+					Responses: map[int][]framework.Response{
+						http.StatusOK: {{
+							Description: "OK",
+							Fields: map[string]*framework.FieldSchema{
+								"keys": {
+									Type:        framework.TypeStringSlice,
+									Description: `A list of mfa method configurations keys`,
+									Required:    true,
+								},
+								"key_info": {
+									Type:        framework.TypeMap,
+									Description: `MFA method configurations details keyed by the id`,
+									Required:    false,
+								},
+							},
+						}},
+					},
 				},
 			},
 		},
@@ -605,6 +646,23 @@ func mfaLoginEnforcementPaths(i *IdentityStore) []*framework.Path {
 				logical.ListOperation: &framework.PathOperation{
 					Callback: i.handleMFALoginEnforcementList,
 					Summary:  "List login enforcements",
+					Responses: map[int][]framework.Response{
+						http.StatusOK: {{
+							Description: "OK",
+							Fields: map[string]*framework.FieldSchema{
+								"keys": {
+									Type:        framework.TypeStringSlice,
+									Description: `A list of login enforcement keys`,
+									Required:    true,
+								},
+								"key_info": {
+									Type:        framework.TypeMap,
+									Description: `Login enforcement details keyed by the id`,
+									Required:    false,
+								},
+							},
+						}},
+					},
 				},
 			},
 		},
@@ -677,6 +735,10 @@ func (i *IdentityStore) Invalidate(ctx context.Context, key string) {
 		i.invalidateLocalAliasesBucket(ctx, key)
 	case strings.HasPrefix(key, scimClientStoragePrefix):
 		i.invalidateSCIMClient(ctx, key)
+	case strings.HasPrefix(key, tpmBucketsPrefix):
+		i.invalidateTPMBucket(ctx, key)
+	case strings.HasPrefix(key, tpmgroupBucketsPrefix):
+		i.invalidateTPMGroupBucket(ctx, key)
 	}
 }
 
@@ -1431,7 +1493,8 @@ func (i *IdentityStore) CreateEntity(ctx context.Context) (*identity.Entity, err
 		1,
 		[]metrics.Label{
 			nsLabel,
-		})
+		},
+	)
 
 	return entity.Clone()
 }
@@ -1555,7 +1618,8 @@ func (i *IdentityStore) CreateOrFetchEntity(ctx context.Context, alias *logical.
 				nsLabel,
 				{"auth_method", newAlias.MountType},
 				{"mount_point", newAlias.MountPath},
-			})
+			},
+		)
 		entityCreated = true
 	}
 

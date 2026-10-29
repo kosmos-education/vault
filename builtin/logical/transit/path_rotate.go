@@ -67,7 +67,7 @@ func (b *backend) pathRotateWrite(ctx context.Context, req *logical.Request, d *
 	}
 	defer p.Unlock()
 	var keyId string
-	if p.Type == keysutil.KeyType_MANAGED_KEY {
+	if p.KeyVersionType(p.LatestVersion) == keysutil.KeyType_MANAGED_KEY {
 		keyId, err = GetManagedKeyUUID(ctx, b, managedKeyName, managedKeyId)
 		if err != nil {
 			b.Logger().Error("failed to rotate key", "name", name, "error", err.Error())
@@ -80,7 +80,7 @@ func (b *backend) pathRotateWrite(ctx context.Context, req *logical.Request, d *
 	}
 
 	keyMetadata := b.keyPolicyObservationMetadata(p)
-	if p.Type == keysutil.KeyType_MANAGED_KEY && keyId != "" {
+	if p.KeyVersionType(p.LatestVersion) == keysutil.KeyType_MANAGED_KEY && keyId != "" {
 		keyMetadata["managed_key_id"] = keyId
 	}
 

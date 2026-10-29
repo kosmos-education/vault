@@ -14,17 +14,9 @@ locals {
   test_names = var.test_names != null ? var.test_names : []
 
   vault_addr = var.vault_addr != null ? var.vault_addr : (
-    var.leader_public_ip != null ? (
-      contains(split("", var.leader_public_ip), ":")
-      ? "http://[${var.leader_public_ip}]:8200"
-      : "http://${var.leader_public_ip}:8200"
-      ) : (
-      var.leader_host != null ? (
-        contains(split("", var.leader_host.public_ip), ":")
-        ? "http://[${var.leader_host.public_ip}]:8200"
-        : "http://${var.leader_host.public_ip}:8200"
-      ) : "http://127.0.0.1:8200"
-    )
+    contains(split("", coalesce(var.leader_public_ip, "")), ":")
+    ? "http://[${var.leader_public_ip}]:8200"
+    : "http://${coalesce(var.leader_public_ip, "127.0.0.1")}:8200"
   )
 
   # isolated/verify tests require EXPECTED_STATE, TIMEOUT_SECONDS, RETRY_INTERVAL, and DEFAULT_LCQ.
@@ -66,7 +58,7 @@ resource "enos_local_exec" "run_blackbox_test" {
     {
       VAULT_TOKEN        = var.vault_root_token
       VAULT_ADDR         = local.vault_addr
-      VAULT_ADDR_DEBUG   = "vault_addr_var=${coalesce(var.vault_addr, "null")}, leader_public_ip=${coalesce(var.leader_public_ip, "null")}, leader_host=${var.leader_host != null ? var.leader_host.public_ip : "null"}, computed=${local.vault_addr}"
+      VAULT_ADDR_DEBUG   = "vault_addr_var=${coalesce(var.vault_addr, "null")}, leader_public_ip=${coalesce(var.leader_public_ip, "null")}, computed=${local.vault_addr}"
       VAULT_TEST_PACKAGE = var.test_package
       VAULT_TEST_MATRIX  = length(local.test_names) > 0 ? local_file.test_matrix.filename : ""
       VAULT_EDITION      = var.vault_edition

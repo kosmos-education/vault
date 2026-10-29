@@ -254,9 +254,10 @@ const secretsEngineListRoute = '/vault/secrets-engines';
 const mountEngine = async ({ type, version }, path) => {
   await mountSecrets.visit();
   await click(GENERAL.cardContainer(type));
+  await click(GENERAL.button('next'));
   await fillIn(GENERAL.inputByAttr('path'), path);
   if (type === 'kv' && version === 1) {
-    await click(GENERAL.button('Method Options'));
+    await click(GENERAL.button('View additional settings'));
     await mountSecrets.version(1);
   }
   await click(GENERAL.submitButton);
@@ -385,8 +386,8 @@ const runEngineCase = async (assert, engine, uid, isEnterprise = false) => {
   assertMenuOptionVisibility(
     assert,
     {
-      Configure: expectedManage.showConfigure,
-      Delete: expectedManage.showDelete,
+      'view-configuration': expectedManage.showConfigure,
+      'delete-engine-path': expectedManage.showDelete,
     },
     'Action menu',
     engine.key
@@ -394,7 +395,7 @@ const runEngineCase = async (assert, engine, uid, isEnterprise = false) => {
 
   if (expectedManage.showConfigure) {
     // click configure and verify route
-    await clickVisibleMenuItem('Configure');
+    await clickVisibleMenuItem('view-configuration');
     await settled();
     assert.true(
       actionConfigureRoutes.includes(currentRouteName()),
@@ -407,7 +408,7 @@ const runEngineCase = async (assert, engine, uid, isEnterprise = false) => {
     // click delete and verify the engine is removed from the list
     await filterEngineRowByPath(mountPath);
     await click(GENERAL.menuTrigger);
-    await clickVisibleMenuItem('Delete');
+    await clickVisibleMenuItem('delete-engine-path');
     const didConfirmActionDelete = await clickVisibleConfirmButton();
     assert.true(didConfirmActionDelete, `Action: Delete shows confirm button for ${engine.key}`);
     await settled();

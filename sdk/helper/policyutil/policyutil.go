@@ -22,12 +22,6 @@ var (
 	errPolicyNameParentSegment = errors.New("policy name cannot contain '..' path segments")
 )
 
-// CanonicalizePolicyName returns the canonical policy-name representation used
-// in policy validation and comparisons.
-func CanonicalizePolicyName(name string) string {
-	return strings.ToLower(strings.TrimSpace(name))
-}
-
 // ValidatePolicyName validates a policy name and returns its canonical form.
 func ValidatePolicyName(name string) (string, error) {
 	canonicalName := CanonicalizePolicyName(name)
@@ -71,6 +65,15 @@ func ParsePolicies(policiesRaw interface{}) []string {
 	}
 
 	return SanitizePolicies(policies, false)
+}
+
+// CanonicalizePolicyName returns the canonical form of a single policy name.
+// Policy names are compared and stored case-insensitively and without
+// surrounding whitespace, so canonicalization trims leading and trailing
+// whitespace (including tabs, newlines, and Unicode space characters, per
+// unicode.IsSpace) and lowercases the result.
+func CanonicalizePolicyName(policy string) string {
+	return strings.ToLower(strings.TrimSpace(policy))
 }
 
 // SanitizePolicies performs the common input validation tasks

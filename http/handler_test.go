@@ -22,9 +22,9 @@ import (
 	"github.com/go-test/deep"
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/vault/api"
-	"github.com/hashicorp/vault/helper/namespace"
 	"github.com/hashicorp/vault/helper/versions"
 	"github.com/hashicorp/vault/internalshared/configutil"
+	"github.com/hashicorp/vault/internalshared/namespace"
 	"github.com/hashicorp/vault/sdk/helper/consts"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/hashicorp/vault/vault"
@@ -896,14 +896,12 @@ func testNonPrintable(t *testing.T, disable bool) {
 func TestHandler_Parse_Form(t *testing.T) {
 	cluster := vault.NewTestCluster(t, &vault.CoreConfig{}, &vault.TestClusterOptions{
 		HandlerFunc: Handler,
+		NumCores:    1,
 	})
-	cluster.Start()
-	defer cluster.Cleanup()
-
 	cores := cluster.Cores
-
-	core := cores[0].Core
-	vault.TestWaitActive(t, core)
+	client := cores[0].Client
+	err := client.Sys().Mount("secret", &api.MountInput{Type: "kv"})
+	require.NoError(t, err)
 
 	c := cleanhttp.DefaultClient()
 	c.Transport = &http.Transport{
@@ -926,21 +924,14 @@ func TestHandler_Parse_Form(t *testing.T) {
 	req.Header.Set("x-vault-token", cluster.RootToken)
 	req.Header.Set("content-type", "application/x-www-form-urlencoded")
 	resp, err := c.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	if resp.StatusCode != 204 {
 		t.Fatalf("bad response: %#v\nrequest was: %#v\nurl was: %#v", *resp, *req, req.URL)
 	}
 
-	client := cores[0].Client
-	client.SetToken(cluster.RootToken)
-
 	apiResp, err := client.Logical().Read("secret/foo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	if apiResp == nil {
 		t.Fatal("api resp is nil")
 	}
@@ -967,8 +958,6 @@ func TestHandler_MaxRequestSize(t *testing.T) {
 		HandlerFunc: Handler,
 		NumCores:    1,
 	})
-	cluster.Start()
-	defer cluster.Cleanup()
 
 	client := cluster.Cores[0].Client
 	_, err := client.KVv2("secret").Put(context.Background(), "foo", map[string]interface{}{
@@ -1203,8 +1192,6 @@ func TestHandler_JSONLimitQuotaWrappers(t *testing.T) {
 					},
 				},
 			})
-			cluster.Start()
-			defer cluster.Cleanup()
 
 			client := cluster.Cores[0].Client
 			client.SetToken(cluster.RootToken)

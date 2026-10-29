@@ -33,8 +33,6 @@ type SharedConfig struct {
 
 	Telemetry *Telemetry `hcl:"-"`
 
-	HCPLinkConf *HCPLinkConfig `hcl:"-"`
-
 	DefaultMaxRequestDuration    time.Duration `hcl:"-"`
 	DefaultMaxRequestDurationRaw interface{}   `hcl:"default_max_request_duration"`
 
@@ -55,6 +53,7 @@ type SharedConfig struct {
 	ClusterName string `hcl:"cluster_name"`
 
 	AdministrativeNamespacePath string `hcl:"administrative_namespace_path"`
+	OperatorNamespacePath       string `hcl:"operator_namespace_path"`
 }
 
 func ParseConfig(d string) (*SharedConfig, error) {
@@ -149,14 +148,7 @@ func ParseConfig(d string) (*SharedConfig, error) {
 		}
 	}
 
-	if o := list.Filter("cloud"); len(o.Items) > 0 {
-		result.found("cloud", "Cloud")
-		if err := parseCloud(&result, o); err != nil {
-			return nil, fmt.Errorf("error parsing 'cloud': %w", err)
-		}
-	}
-
-	entConfig := &(result.EntSharedConfig)
+	entConfig := &result.EntSharedConfig
 	if err := entConfig.ParseConfig(list); err != nil {
 		return nil, fmt.Errorf("error parsing enterprise config: %w", err)
 	}
@@ -184,6 +176,7 @@ func (c *SharedConfig) Sanitized() map[string]interface{} {
 		"pid_file":                      c.PidFile,
 		"cluster_name":                  c.ClusterName,
 		"administrative_namespace_path": c.AdministrativeNamespacePath,
+		"operator_namespace_path":       c.OperatorNamespacePath,
 	}
 
 	// Optional log related settings

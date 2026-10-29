@@ -10,19 +10,95 @@ import (
 	"testing"
 	"time"
 
-	"github.com/armon/go-metrics"
 	"github.com/go-test/deep"
+	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/hashicorp/go-secure-stdlib/parseutil"
 	uuid "github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault/builtin/credential/approle"
 	credUserpass "github.com/hashicorp/vault/builtin/credential/userpass"
 	"github.com/hashicorp/vault/helper/identity"
-	"github.com/hashicorp/vault/helper/namespace"
+	"github.com/hashicorp/vault/internalshared/namespace"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// TestNormalizeCaseInsensitiveResourcePath verifies that
+// normalizeCaseInsensitiveResourcePath lowercases (and, for policy paths,
+// trims whitespace from) the resource-name segment of paths handled by
+// backends that resolve that name case-insensitively, while leaving
+// identity paths untouched once the identity store has entered
+// case-sensitive mode (IdentityStore.disableLowerCasedNames). Identity
+// names are only guaranteed unique per-case once the store is in that mode
+// (entered automatically when a duplicate name is detected across cases),
+// so unconditionally lowercasing would incorrectly let a policy scoped to
+// "admin" also authorize the distinct group "Admin".
+func TestNormalizeCaseInsensitiveResourcePath(t *testing.T) {
+	t.Parallel()
+
+	userpassEntry := &MountEntry{Table: credentialTableType, Type: "userpass", Path: "userpass/"}
+	approleEntry := &MountEntry{Table: credentialTableType, Type: "approle", Path: "approle/"}
+	awsEC2Entry := &MountEntry{Table: credentialTableType, Type: "aws-ec2", Path: "aws-ec2/"}
+	azureEntry := &MountEntry{Table: credentialTableType, Type: "azure", Path: "azure/"}
+	gcpEntry := &MountEntry{Table: credentialTableType, Type: "gcp", Path: "gcp/"}
+	githubEntry := &MountEntry{Table: credentialTableType, Type: "github", Path: "github/"}
+	tpmEntry := &MountEntry{Table: credentialTableType, Type: "tpm", Path: "tpm/"}
+	kubernetesEntry := &MountEntry{Table: credentialTableType, Type: "kubernetes", Path: "kubernetes/"}
+	oktaEntry := &MountEntry{Table: credentialTableType, Type: "okta", Path: "okta/"}
+	ldapEntry := &MountEntry{Table: credentialTableType, Type: "ldap", Path: "ldap/"}
+	radiusEntry := &MountEntry{Table: credentialTableType, Type: "radius", Path: "radius/"}
+	// A secrets mount whose type collides with an auth backend name; plugin
+	// names are namespaced by plugin type, so this is legitimately possible.
+	secretCertEntry := &MountEntry{Table: mountTableType, Type: "cert", Path: "cert/"}
+	// An external auth plugin overriding the builtin of the same name, which
+	// Vault permits for unversioned plugins. A non-empty RunningSha256 is
+	// what marks a mount as running an external plugin.
+	externalApproleEntry := &MountEntry{
+		Table:         credentialTableType,
+		Type:          "approle",
+		Path:          "approle-ext/",
+		RunningSha256: "abc123",
+	}
+
+	tests := []struct {
+		name                  string
+		path                  string
+		entry                 *MountEntry
+		disableLowerCaseNames bool
+		want                  string
+	}{
+		{name: "token lookup self", path: "auth/token/lookup-self", want: true},
+		{name: "token lookup", path: "auth/token/lookup", want: true},
+		{name: "capabilities self", path: "sys/capabilities-self", want: true},
+		{name: "leases lookup", path: "sys/leases/lookup", want: true},
+		{name: "leases lookup prefix", path: "sys/leases/lookup/secret/foo", want: true},
+		{name: "leases count", path: "sys/leases/count", want: true},
+		{name: "leases list", path: "sys/leases", want: true},
+		{name: "cubbyhole", path: "cubbyhole/test", want: true},
+		{name: "token renew self excluded", path: "auth/token/renew-self", want: false},
+		{name: "leases renew excluded", path: "sys/leases/renew", want: false},
+		{name: "unrelated", path: "secret/data/foo", want: false},
+		{name: "ui mounts preflight", path: "sys/internal/ui/mounts/secret/data/foo", want: true},
+		{name: "ui mounts with nested path", path: "sys/internal/ui/mounts/kv/data/nested/key", want: true},
+		{name: "ui mounts prefix only", path: "sys/internal/ui/mounts/", want: true},
+		{name: "ui mounts exact", path: "sys/internal/ui/mounts", want: true},
+		{name: "ui namespaces exact", path: "sys/internal/ui/namespaces", want: true},
+		{name: "ui namespaces with suffix excluded", path: "sys/internal/ui/namespaces/foo", want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := &Core{identityStore: &IdentityStore{}}
+			if tc.disableLowerCaseNames {
+				c.identityStore.SetDisableLowerCasedNames()
+			}
+			require.Equal(t, tc.want, c.normalizeCaseInsensitiveResourcePath(tc.path, tc.entry))
+		})
+	}
+}
 
 // TestNormalizeCaseInsensitiveResourcePath verifies that
 // normalizeCaseInsensitiveResourcePath lowercases (and, for policy paths,

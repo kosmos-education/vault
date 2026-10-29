@@ -40,6 +40,11 @@ binary {
         // the FIPS 140-3 builds.
         "GO-2026-6091", "GO-2026-6088", "GO-2026-5972", "GO-2026-6218",
         "GO-2026-6090", "GO-2026-5026", "GO-2026-6089", "GO-2026-5942",
+        "GO-2026-6600", "GO-2026-6607", "GO-2026-6608", "GO-2026-6613",
+        "GO-2026-6604", "GO-2026-6609", "GO-2026-6612", "GO-2026-6605",
+        "GO-2026-6603", "GO-2026-6617", "GO-2026-6599", "GO-2026-6610",
+        "GO-2026-6611", "GO-2026-6809",
+
 
         // google.golang.org/grpc@v1.84.0
         // This isn't actually a problem because we do a replace to a version
@@ -50,10 +55,11 @@ binary {
         "GO-2026-6443",
 
         // https://github.com/advisories/GHSA-qqj6-54q6-cxv6
+        // https://pkg.go.dev/vuln/GO-2026-6665
         // gosnowflake v1 does not currently have patch for the issue, nor is
         // clear if v1 is still actively maintained. We'll want to migrate to
         // v2 ASAP.
-        "GHSA-qqj6-54q6-cxv6",
+        "GHSA-qqj6-54q6-cxv6", "GO-2026-6665",
       ]
     }
   }
@@ -100,6 +106,10 @@ container {
         // the FIPS 140-3 builds.
         "GO-2026-6091", "GO-2026-6088", "GO-2026-5972", "GO-2026-6218",
         "GO-2026-6090", "GO-2026-5026", "GO-2026-6089", "GO-2026-5942",
+        "GO-2026-6600", "GO-2026-6607", "GO-2026-6608", "GO-2026-6613",
+        "GO-2026-6604", "GO-2026-6609", "GO-2026-6612", "GO-2026-6605",
+        "GO-2026-6603", "GO-2026-6617", "GO-2026-6599", "GO-2026-6610",
+        "GO-2026-6611", "GO-2026-6809",
 
         // google.golang.org/grpc@v1.84.0
         // This isn't actually a problem because we do a replace to a version
@@ -110,10 +120,11 @@ container {
         "GO-2026-6443",
 
         // https://github.com/advisories/GHSA-qqj6-54q6-cxv6
+        // https://pkg.go.dev/vuln/GO-2026-6665
         // gosnowflake v1 does not currently have patch for the issue, nor is
         // clear if v1 is still actively maintained. We'll want to migrate to
         // v2 ASAP.
-        "GHSA-qqj6-54q6-cxv6",
+        "GHSA-qqj6-54q6-cxv6", "GO-2026-6665",
       ]
 
       // The OSV scanner will trip on several packages that are included in the

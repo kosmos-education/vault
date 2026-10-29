@@ -15,10 +15,10 @@ import (
 	"github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/builtin/plugin"
 	"github.com/hashicorp/vault/helper/constants"
-	"github.com/hashicorp/vault/helper/namespace"
 	"github.com/hashicorp/vault/helper/testhelpers/corehelpers"
 	"github.com/hashicorp/vault/helper/testhelpers/teststorage"
 	vaulthttp "github.com/hashicorp/vault/http"
+	"github.com/hashicorp/vault/internalshared/namespace"
 	"github.com/hashicorp/vault/sdk/helper/consts"
 	"github.com/hashicorp/vault/sdk/helper/pluginutil"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -64,7 +64,6 @@ func TestSystemBackend_Plugin_secret(t *testing.T) {
 		t.Run(tc.pluginVersion, func(t *testing.T) {
 			t.Parallel()
 			cluster := testSystemBackendMock(t, 1, 1, logical.TypeLogical, tc.pluginVersion)
-			defer cluster.Cleanup()
 
 			core := cluster.Cores[0]
 
@@ -134,7 +133,6 @@ func TestSystemBackend_Plugin_auth(t *testing.T) {
 		t.Run(tc.pluginVersion, func(t *testing.T) {
 			t.Parallel()
 			cluster := testSystemBackendMock(t, 1, 1, logical.TypeCredential, tc.pluginVersion)
-			defer cluster.Cleanup()
 
 			core := cluster.Cores[0]
 
@@ -164,9 +162,6 @@ func TestSystemBackend_Plugin_auth(t *testing.T) {
 				if core.Sealed() {
 					t.Fatal("should not be sealed")
 				}
-				// Wait for active so post-unseal takes place
-				// If it fails, it means unseal process failed
-				vault.TestWaitActive(t, core.Core)
 			}
 		})
 	}
@@ -192,7 +187,6 @@ func TestSystemBackend_Plugin_MissingBinary(t *testing.T) {
 		t.Run(tc.pluginVersion, func(t *testing.T) {
 			t.Parallel()
 			cluster := testSystemBackendMock(t, 1, 1, logical.TypeLogical, tc.pluginVersion)
-			defer cluster.Cleanup()
 
 			core := cluster.Cores[0]
 
@@ -252,7 +246,6 @@ func TestSystemBackend_Plugin_MismatchType(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.pluginVersion, func(t *testing.T) {
 			cluster := testSystemBackendMock(t, 1, 1, logical.TypeLogical, tc.pluginVersion)
-			defer cluster.Cleanup()
 
 			core := cluster.Cores[0]
 
@@ -312,7 +305,6 @@ func testPlugin_CatalogRemoved(t *testing.T, btype logical.BackendType, testMoun
 		t.Run(tc.pluginVersion, func(t *testing.T) {
 			t.Parallel()
 			cluster := testSystemBackendMock(t, 1, 1, logical.TypeLogical, tc.pluginVersion)
-			defer cluster.Cleanup()
 
 			core := cluster.Cores[0]
 
@@ -391,7 +383,6 @@ func TestSystemBackend_Plugin_autoReload(t *testing.T) {
 		t.Run(tc.pluginVersion, func(t *testing.T) {
 			t.Parallel()
 			cluster := testSystemBackendMock(t, 1, 1, logical.TypeLogical, tc.pluginVersion)
-			defer cluster.Cleanup()
 
 			core := cluster.Cores[0]
 
@@ -451,7 +442,6 @@ func TestSystemBackend_Plugin_SealUnseal(t *testing.T) {
 		t.Run(tc.pluginVersion, func(t *testing.T) {
 			t.Parallel()
 			cluster := testSystemBackendMock(t, 1, 1, logical.TypeLogical, tc.pluginVersion)
-			defer cluster.Cleanup()
 
 			// Seal the cluster
 			cluster.EnsureCoresSealed(t)
@@ -565,7 +555,6 @@ func testSystemBackend_PluginReload(t *testing.T, path string, reqData map[strin
 	for _, tc := range testCases {
 		t.Run(tc.pluginVersion, func(t *testing.T) {
 			cluster := testSystemBackendMock(t, 1, 2, backendType, tc.pluginVersion)
-			defer cluster.Cleanup()
 
 			core := cluster.Cores[0]
 			client := core.Client
@@ -612,7 +601,6 @@ func testSystemBackend_PluginReload(t *testing.T, path string, reqData map[strin
 
 func TestSystemBackend_PluginReload_WarningIfNoneReloaded(t *testing.T) {
 	cluster := testSystemBackendMock(t, 1, 2, logical.TypeLogical, "v5")
-	defer cluster.Cleanup()
 
 	core := cluster.Cores[0]
 	client := core.Client
@@ -664,7 +652,6 @@ func testSystemBackendMock(t *testing.T, numCores, numMounts int, backendType lo
 	cluster := vault.NewTestCluster(t, conf, opts)
 
 	core := cluster.Cores[0]
-	vault.TestWaitActive(t, core.Core)
 	client := core.Client
 
 	env := []string{pluginutil.PluginCACertPEMEnv + "=" + cluster.CACertPEMFile}
@@ -722,11 +709,8 @@ func TestSystemBackend_Plugin_Env(t *testing.T) {
 		NumCores:    1,
 		TempDir:     pluginDir,
 	})
-	cluster.Start()
-	t.Cleanup(cluster.Cleanup)
 
 	core := cluster.Cores[0]
-	vault.TestWaitActive(t, core.Core)
 	client := core.Client
 
 	key := t.Name() + "_FOO"

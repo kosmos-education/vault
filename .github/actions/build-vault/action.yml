@@ -10,6 +10,11 @@ description: |
   both repositories.
 
 inputs:
+  build-source:
+    description: |
+      The Go package of the entrypoint to build. Set vault-binary-name too when building a package
+      other than the default, as entrypoints in cmd directories would otherwise be named cmd.
+    default: "."
   github-token:
     description: An elevated Github token to access private Go modules if necessary.
     default: ""
@@ -41,6 +46,9 @@ inputs:
   package-name:
     description: The name to use for the linux packages.
     default: ${{ github.event.repository.name }}
+  remove-symbols:
+    description: Strip the symbol table and DWARF information from the binary.
+    default: "false"
   vault-binary-name:
     description: The name of the vault binary.
     default: vault
@@ -64,7 +72,8 @@ runs:
       with:
         github-token: ${{ inputs.github-token }}
     - uses: ./.github/actions/install-tools # sets env.VAULT_TOOLS_PATH
-    - name: Restore UI from cache
+    - if: contains(inputs.go-tags, 'ui')
+      name: Restore UI from cache
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         # Restore the UI asset from the UI build workflow. Never use a partial restore key.
@@ -114,19 +123,46 @@ runs:
       uses: hashicorp-forge/actions-pao-tool/select-license@0409050df899ec0612745ca17e47c0fba18b7c10 # v1.1.0
       with:
         arch: ${{ inputs.goarch }}
-    - if: inputs.cgo-enabled == '0'
+    # *NEVER* set GOPRIVATE or inject git credentials for community builds.
+    - if: inputs.cgo-enabled == '0' && inputs.vault-edition == 'ce'
       name: ${{ steps.metadata.outputs.build-step-name }}
       env:
+        BIN_NAME: ${{ inputs.vault-binary-name }}
+        BUILD_SOURCE: ${{ inputs.build-source }}
         CGO_ENABLED: 0
         GO_TAGS: ${{ inputs.go-tags }}
         GOARCH: ${{ inputs.goarch }}
         GOARM: ${{ inputs.goarm }}
         GOOS: ${{ inputs.goos }}
         GOEXPERIMENT: ${{ inputs.goexperiment }}
-        # *NEVER* set GOPRIVATE for community builds
-        GOPRIVATE: ${{ inputs.vault-edition != 'ce' && 'github.com/hashicorp/*' || '' }}
+        REMOVE_SYMBOLS: ${{ inputs.remove-symbols == 'true' && '1' || '' }}
+        # Skip go generate. Generated code should be checked in.
+        SKIP_GEN: "1"
         VERSION: ${{ inputs.vault-version }}
-        VERSION_METADATA: ${{ inputs.vault-edition != 'ce' && inputs.vault-edition || '' }}
+        VERSION_METADATA: ""
+      shell: bash
+      run: make ci-build
+    - if: inputs.cgo-enabled == '0' && inputs.vault-edition != 'ce'
+      name: ${{ steps.metadata.outputs.build-step-name }}
+      env:
+        BIN_NAME: ${{ inputs.vault-binary-name }}
+        BUILD_SOURCE: ${{ inputs.build-source }}
+        CGO_ENABLED: 0
+        GO_TAGS: ${{ inputs.go-tags }}
+        GOARCH: ${{ inputs.goarch }}
+        GOARM: ${{ inputs.goarm }}
+        GOOS: ${{ inputs.goos }}
+        GOEXPERIMENT: ${{ inputs.goexperiment }}
+        GOPRIVATE: github.com/hashicorp/*
+        REMOVE_SYMBOLS: ${{ inputs.remove-symbols == 'true' && '1' || '' }}
+        # Skip go generate. Generated code should be checked in.
+        SKIP_GEN: "1"
+        VERSION: ${{ inputs.vault-version }}
+        VERSION_METADATA: ${{ inputs.vault-edition }}
+        # Authenticate module downloads on cache misses without poisoning the runner's git config.
+        GIT_CONFIG_COUNT: "1"
+        GIT_CONFIG_KEY_0: url.https://user:${{ inputs.github-token }}@github.com.insteadOf
+        GIT_CONFIG_VALUE_0: https://github.com
       shell: bash
       run: make ci-build
     # CGO builds use a sandboxed container builder to cross-compile with the correct version of
@@ -195,6 +231,8 @@ runs:
           -v ${VAULT_TOOLS_PATH}:/opt/tools/bin \
           -v $(go env GOMODCACHE):/go-mod-cache \
             --env GITHUB_TOKEN='${{ inputs.github-token }}' \
+            --env BIN_NAME='${{ inputs.vault-binary-name }}' \
+            --env BUILD_SOURCE='${{ inputs.build-source }}' \
             --env CGO_ENABLED=1 \
             --env GO_TAGS='${{ inputs.go-tags }}' \
             --env GOARCH='${{ inputs.goarch }}' \
@@ -202,6 +240,8 @@ runs:
             --env GOEXPERIMENT='${{ inputs.goexperiment }}' \
             --env GOMODCACHE=/go-mod-cache \
             --env GOOS='${{ inputs.goos }}' \
+            --env REMOVE_SYMBOLS='${{ inputs.remove-symbols == 'true' && '1' || '' }}' \
+            --env SKIP_GEN=1 \
             --env VERSION='${{ inputs.vault-version }}' \
             --env VERSION_METADATA='${{ inputs.vault-edition }}' \
               localhost:5000/vault-builder:${{ steps.metadata.outputs.vault-builder-cache-key }} \
@@ -231,6 +271,11 @@ runs:
         # GitHub rate limits when downloading nfpm. This is safe for CE and Ent as
         # the token is only used for nfpm.
         GH_TOKEN: ${{ inputs.github-token || github.token }}
+        # The action builds an nfpm_template binary via `go build .` from a
+        # subdirectory that is not part of the workspace.  Disable workspace
+        # mode so Go resolves against that subdirectory's own module rather
+        # than failing to find the package in the root module.
+        GOWORK: "off"
       with:
         name: ${{ inputs.package-name }}
         description: Vault is a tool for secrets management, encryption as a service, and privileged access management.
@@ -278,5 +323,6 @@ runs:
         goarch: ${{ inputs.goarch }}
         goos: ${{ inputs.goos }}
         vault-binary-path: ${{ steps.metadata.outputs.binary-path }}
+        vault-binary-name: ${{ inputs.vault-binary-name }}
         vault-edition: ${{ inputs.vault-edition }}
         vault-version: ${{ inputs.vault-version }}

@@ -3,12 +3,14 @@
   SPDX-License-Identifier: BUSL-1.1
 }}
 
-<Page::Header @title={{if this.method (concat "Configure " this.method.name " MFA") "Multi-factor authentication"}}>
+<Page::Header
+  @title={{if this.method.type (concat "Configure " this.methodNameFromType " MFA") "Multi-factor authentication"}}
+>
   <:breadcrumbs>
     <Page::Breadcrumbs
       @breadcrumbs={{array
         (hash label="Vault" route="vault.cluster.dashboard" icon="vault")
-        (hash label="Methods" route="vault.cluster.access.mfa.methods.index")
+        (hash label="Multi-factor authentication" route="vault.cluster.access.mfa.methods.index")
         (hash label="Configure MFA Method")
       }}
     />
@@ -23,8 +25,8 @@
 
 <div>
   {{#if this.showForms}}
-    <h3 class="is-size-4 has-text-weight-semibold">Settings</h3>
-    <p class="has-border-top-light has-top-padding-l">
+    <h2 class="is-size-4 has-text-weight-semibold">Settings</h2>
+    <p class="has-border-top-light has-top-padding-m">
       {{this.description}}
       <Hds::Link::Inline
         @isHrefExternal={{true}}
@@ -33,16 +35,16 @@
         Learn more
       </Hds::Link::Inline>
     </p>
-    <Mfa::MethodForm @model={{this.method}} @validations={{this.methodErrors}} class="is-shadowless" />
+    <Mfa::MethodForm @form={{this.method}} @validations={{this.methodErrors}} class="is-shadowless" />
     <Mfa::MfaLoginEnforcementHeader
       @isInline={{true}}
       @radioCardGroupValue={{this.enforcementPreference}}
       @onRadioCardSelect={{this.onEnforcementPreferenceChange}}
-      @onEnforcementSelect={{fn (mut this.enforcement)}}
+      @onEnforcementSelect={{this.onEnforcementSelect}}
     />
     {{#if (eq this.enforcementPreference "new")}}
       <Mfa::MfaLoginEnforcementForm
-        @model={{this.enforcement}}
+        @form={{this.enforcement}}
         @isInline={{true}}
         @modelErrors={{this.enforcementErrors}}
         class="has-top-margin-l"
@@ -57,17 +59,23 @@
           @onChange={{this.onTypeSelect}}
           data-test-radio-card={{lowercase method.name}}
         >
-          <div class="radio-card-row is-flex-v-centered">
-            <div>
-              <Icon @name={{method.icon}} @size="24" class={{if (eq method.name "TOTP") "has-text-grey"}} />
-              <p
-                class="has-text-weight-semibold has-text-center
-                  {{if (or (eq method.name 'Okta') (eq method.name 'TOTP')) 'has-top-margin-xs'}}"
+          <Hds::Layout::Flex @justify="center" class="has-padding-16 is-flex-1">
+            <Hds::Layout::Flex @direction="column" @align="center" @justify="center">
+              <Icon
+                @name={{if (and method.iconMono this.isDarkMode) method.iconMono method.icon}}
+                @size="24"
+                class={{if (eq method.name "TOTP") "has-text-grey"}}
+              />
+              <Hds::Text::Body
+                @tag="p"
+                @weight="semibold"
+                @align="center"
+                class={{if (or (eq method.name "Okta") (eq method.name "TOTP")) "has-top-margin-xs"}}
               >
                 {{method.name}}
-              </p>
-            </div>
-          </div>
+              </Hds::Text::Body>
+            </Hds::Layout::Flex>
+          </Hds::Layout::Flex>
         </RadioCard>
       {{/each}}
     </div>

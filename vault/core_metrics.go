@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/armon/go-metrics"
-	"github.com/hashicorp/vault/helper/metricsutil"
-	"github.com/hashicorp/vault/helper/namespace"
+	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/hashicorp/vault/helper/pluginconsts"
+	"github.com/hashicorp/vault/internalshared/metricsutil"
+	"github.com/hashicorp/vault/internalshared/namespace"
 	"github.com/hashicorp/vault/limits"
 	"github.com/hashicorp/vault/physical/raft"
 	"github.com/hashicorp/vault/sdk/helper/consts"
@@ -466,7 +466,7 @@ func (c *Core) findOfficialKvMounts(ctx context.Context, includeLocal, includeRe
 				continue
 			}
 
-			if !(isOfficialOrBuiltin(runner)) {
+			if !isOfficialOrBuiltin(runner) {
 				continue
 			}
 
@@ -856,8 +856,10 @@ type RoleCounts struct {
 	GCPImpersonatedAccounts    int `json:"gcp_impersonated_accounts"`
 	LDAPDynamicRoles           int `json:"ldap_dynamic_roles"`
 	LDAPStaticRoles            int `json:"ldap_static_roles"`
+	LDAPLibrarySets            int `json:"ldap_library_sets"`
 	OpenLDAPDynamicRoles       int `json:"openldap_dynamic_roles"`
 	OpenLDAPStaticRoles        int `json:"openldap_static_roles"`
+	OpenLDAPLibrarySets        int `json:"openldap_library_sets"`
 	AlicloudDynamicRoles       int `json:"alicloud_dynamic_roles"`
 	RabbitMQDynamicRoles       int `json:"rabbitmq_dynamic_roles"`
 	ConsulDynamicRoles         int `json:"consul_dynamic_roles"`
@@ -866,221 +868,68 @@ type RoleCounts struct {
 	MongoDBAtlasDynamicRoles   int `json:"mongodb_atlas_dynamic_roles"`
 	TerraformCloudDynamicRoles int `json:"terraformcloud_dynamic_roles"`
 	OSLocalAccountRoles        int `json:"os_local_account_static_roles"`
+	TransformRoles             int `json:"transform_roles"`
+	SSHOTPRoles                int `json:"ssh_otp_roles"`
+	SSHCARoles                 int `json:"ssh_ca_roles"`
+	SpiffeRoles                int `json:"spiffe_roles"`
 }
 
 type ManagedKeyCounts struct {
-	TotpKeys int `json:"totp_keys"`
-	KmseKeys int `json:"kmse_keys"`
+	TotpKeys    int `json:"totp_keys"`
+	KmseKeys    int `json:"kmse_keys"`
+	TransitKeys int `json:"transit_keys"`
 }
 
-// getRoleAndManagedKeyCountsInternal gets the role counts for plugins and managed key counts
-// includeLocal determines if local mounts are included
-// includeReplicated determines if replicated mounts are included
-// officialPluginsOnly determines if this function should include only plugins that are official,
-// which would exclude, for example, a custom built version of these plugins.
-func (c *Core) getRoleAndManagedKeyCountsInternal(includeLocal bool, includeReplicated bool, officialPluginsOnly bool) (*RoleCounts, *ManagedKeyCounts, error) {
-	if c.Sealed() {
-		return nil, nil, fmt.Errorf("core is sealed, cannot access mounts table")
-	}
-
-	ctx := namespace.RootContext(c.activeContext)
-	apiList := func(entry *MountEntry, apiPath string) []string {
-		listRequest := &logical.Request{
-			Operation: logical.ListOperation,
-			Path:      entry.namespace.Path + entry.Path + apiPath,
-		}
-
-		resp, err := c.router.Route(ctx, listRequest)
-		if err != nil || resp == nil || resp.Data == nil {
-			return nil
-		}
-
-		rawKeys, ok := resp.Data["keys"]
-		if !ok || rawKeys == nil {
-			return nil
-		}
-
-		// Type switch handles both the 'official' behavior and the 'generic' behavior
-		switch kt := rawKeys.(type) {
-		case []string:
-			// Existing plugins likely hit this path
-			return kt
-		case []interface{}:
-			// External/RPC plugins likely hit this path
-			keys := make([]string, 0, len(kt))
-			for _, k := range kt {
-				if s, ok := k.(string); ok {
-					keys = append(keys, s)
-				}
-			}
-			return keys
-		default:
-			// If it's something totally weird, we still fail safely
-			return nil
-		}
-	}
-
-	// apiReadCount calls the given GET endpoint on a mount and returns the integer value
-	// of the "count" key in the response, or 0 on any failure.
-	apiReadCount := func(entry *MountEntry, apiPath string) int {
-		readRequest := &logical.Request{
-			Operation: logical.ReadOperation,
-			Path:      entry.namespace.Path + entry.Path + apiPath,
-		}
-		resp, err := c.router.Route(ctx, readRequest)
-		if err != nil || resp == nil || resp.Data == nil {
-			return 0
-		}
-		rawCount, ok := resp.Data["count"]
-		if !ok || rawCount == nil {
-			return 0
-		}
-		switch v := rawCount.(type) {
-		case int:
-			return v
-		case int64:
-			return int(v)
-		case uint:
-			return int(v)
-		case uint64:
-			return int(v)
-		case float64:
-			return int(v)
-		default:
-			return 0
-		}
-	}
-
-	c.mountsLock.RLock()
-	defer c.mountsLock.RUnlock()
-
-	var roles RoleCounts
-	var keyCounts ManagedKeyCounts
-	for _, entry := range c.mounts.Entries {
-		if !entry.Local && !includeReplicated {
-			continue
-		}
-		if entry.Local && !includeLocal {
-			continue
-		}
-
-		pluginName := getAdjustedPluginType(entry)
-		if pluginName == "" {
-			continue
-		}
-
-		pluginVersion := entry.RunningVersion
-
-		if officialPluginsOnly {
-			runner, err := c.pluginCatalog.Get(ctx, pluginName, consts.PluginTypeSecrets, pluginVersion)
-			if err != nil {
-				continue
-			}
-
-			if !(isOfficialOrBuiltin(runner)) {
-				continue
-			}
-		}
-
-		switch pluginName {
-		case pluginconsts.SecretEngineAWS:
-			dynamicRoles := apiList(entry, "roles")
-			roles.AWSDynamicRoles += len(dynamicRoles)
-			staticRoles := apiList(entry, "static-roles")
-			roles.AWSStaticRoles += len(staticRoles)
-
-		case pluginconsts.SecretEngineAzure:
-			dynamicRoles := apiList(entry, "roles")
-			roles.AzureDynamicRoles += len(dynamicRoles)
-			staticRoles := apiList(entry, "static-roles")
-			roles.AzureStaticRoles += len(staticRoles)
-
-		case pluginconsts.SecretEngineDatabase:
-			dynamicRoles := apiList(entry, "roles")
-			roles.DatabaseDynamicRoles += len(dynamicRoles)
-			staticRoles := apiList(entry, "static-roles")
-			roles.DatabaseStaticRoles += len(staticRoles)
-
-		case pluginconsts.SecretEngineGCP:
-			rolesets := apiList(entry, "rolesets")
-			roles.GCPRolesets += len(rolesets)
-			staticAccounts := apiList(entry, "static-accounts")
-			roles.GCPStaticAccounts += len(staticAccounts)
-			impersonatedAccounts := apiList(entry, "impersonated-accounts")
-			roles.GCPImpersonatedAccounts += len(impersonatedAccounts)
-
-		case pluginconsts.SecretEngineLDAP:
-			roles.LDAPDynamicRoles += apiReadCount(entry, "role-count")
-			roles.LDAPStaticRoles += apiReadCount(entry, "static-role-count")
-
-		case pluginconsts.SecretEngineOpenLDAP:
-			roles.OpenLDAPDynamicRoles += apiReadCount(entry, "role-count")
-			roles.OpenLDAPStaticRoles += apiReadCount(entry, "static-role-count")
-
-		case pluginconsts.SecretEngineAlicloud:
-			dynamicRoles := apiList(entry, "role")
-			roles.AlicloudDynamicRoles += len(dynamicRoles)
-
-		case pluginconsts.SecretEngineRabbitMQ:
-			dynamicRoles := apiList(entry, "roles")
-			roles.RabbitMQDynamicRoles += len(dynamicRoles)
-
-		case pluginconsts.SecretEngineConsul:
-			dynamicRoles := apiList(entry, "roles")
-			roles.ConsulDynamicRoles += len(dynamicRoles)
-
-		case pluginconsts.SecretEngineNomad:
-			dynamicRoles := apiList(entry, "role")
-			roles.NomadDynamicRoles += len(dynamicRoles)
-
-		case pluginconsts.SecretEngineKubernetes:
-			dynamicRoles := apiList(entry, "roles")
-			roles.KubernetesDynamicRoles += len(dynamicRoles)
-
-		case pluginconsts.SecretEngineMongoDBAtlas:
-			dynamicRoles := apiList(entry, "roles")
-			roles.MongoDBAtlasDynamicRoles += len(dynamicRoles)
-
-		case pluginconsts.SecretEngineTerraform:
-			dynamicRoles := apiList(entry, "role")
-			roles.TerraformCloudDynamicRoles += len(dynamicRoles)
-
-		case pluginconsts.SecretEngineTOTP:
-			keyCountPerEntry := apiList(entry, "keys")
-			keyCounts.TotpKeys += len(keyCountPerEntry)
-
-		case pluginconsts.SecretEngineKeymgmt:
-			keyCountPerEntry := apiList(entry, "key")
-			keyCounts.KmseKeys += len(keyCountPerEntry)
-
-		case pluginconsts.SecretEngineOS:
-			// OS plugin stores all accounts within each host entry
-			// List all hosts, then list accounts for each host
-			hosts := apiList(entry, "hosts/")
-			accountCount := 0
-			for _, host := range hosts {
-				if host == "" {
-					continue
-				}
-				hostName := strings.TrimSuffix(host, "/")
-				accounts := apiList(entry, "hosts/"+hostName+"/accounts/")
-				accountCount += len(accounts)
-			}
-			roles.OSLocalAccountRoles += accountCount
-		}
-	}
-
-	return &roles, &keyCounts, nil
+// SecretEngineResourceCounts holds counts of secret engine resources for product
+// usage telemetry. "Resource" is a catch-all for countable items that aren't keys
+// or roles (tracked by ManagedKeyCounts and RoleCounts), e.g. Transform
+// transformations/templates/alphabets/stores and KMIP scopes/scope roles/CAs.
+type SecretEngineResourceCounts struct {
+	TransformTransformations int `json:"transform_transformations"`
+	TransformTemplates       int `json:"transform_templates"`
+	TransformAlphabets       int `json:"transform_alphabets"`
+	TransformStores          int `json:"transform_stores"`
+	KmipScopes               int `json:"kmip_scopes"`
+	KmipScopeRoles           int `json:"kmip_scope_roles"`
+	KmipCas                  int `json:"kmip_cas"`
 }
 
-func (c *Core) GetRoleCounts() *RoleCounts {
-	roleCounts, _, _ := c.getRoleAndManagedKeyCountsInternal(true, true, false)
-	return roleCounts
-}
-
+// GetRoleCountsForCluster returns the total role counts across all mounts for a primary or secondary cluster
+// For use in tests only
 func (c *Core) GetRoleCountsForCluster() *RoleCounts {
-	roleCounts, _, _ := c.getRoleAndManagedKeyCountsInternal(true, c.isPrimary(), false)
-	return roleCounts
+	m, err := c.CountMetricsSecretMounts(false, false)
+	if err != nil {
+		return nil
+	}
+	if c.isPrimary() {
+		return combineRoleCounts(m.LocalRoleCounts, m.ReplicatedRoleCounts)
+	}
+	return m.LocalRoleCounts
+}
+
+// GetManagedKeyCountsForCluster returns the total managed key counts across all mounts
+func (c *Core) GetManagedKeyCountsForCluster() *ManagedKeyCounts {
+	m, err := c.CountMetricsSecretMounts(false, false)
+	if err != nil {
+		return nil
+	}
+	if c.isPrimary() {
+		return combineManagedKeyCounts(m.LocalManagedKeys, m.ReplicatedManagedKeys)
+	}
+	return m.LocalManagedKeys
+}
+
+// GetSecretEngineResourceCountsForCluster returns the total secret engine resource counts across all mounts for a primary or secondary cluster.
+// On performance secondaries, only local mounts are counted.
+func (c *Core) GetSecretEngineResourceCountsForCluster() *SecretEngineResourceCounts {
+	m, err := c.CountMetricsSecretMounts(false, false)
+	if err != nil {
+		return nil
+	}
+	if c.isPrimary() {
+		return combineSecretEngineResourceCounts(m.LocalSecretEngineResourceCounts, m.ReplicatedSecretEngineResourceCounts)
+	}
+	return m.LocalSecretEngineResourceCounts
 }
 
 // GetKvUsageMetrics returns a map of namespace paths to KV secret counts.

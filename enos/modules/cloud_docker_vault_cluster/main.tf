@@ -168,6 +168,9 @@ resource "docker_container" "vault" {
   name  = "${var.cluster_name}-${count.index}"
   image = var.use_local_build ? docker_image.vault_local[0].name : docker_image.vault_remote[0].image_id
 
+  # Explicitly set network mode to avoid conflicts with networks_advanced
+  network_mode = docker_network.cluster.name
+
   networks_advanced {
     name = docker_network.cluster.name
   }
@@ -205,11 +208,25 @@ resource "docker_container" "vault" {
 
   command = ["vault", "server", "-config=/vault/config/vault.hcl"]
 
-  restart  = "no"
-  must_run = true
+  restart         = "on-failure"
+  max_retry_count = 3
+  must_run        = true
+
+  # Use native docker provider wait functionality with vault status
+  # Exit codes: 0=unsealed, 1=error, 2=sealed - accept only 0 or 2 as healthy
+  wait         = true
+  wait_timeout = 60
+
+  healthcheck {
+    test         = ["CMD-SHELL", "VAULT_ADDR=http://127.0.0.1:${var.vault_port} vault status > /dev/null 2>&1; exit_code=$?; [ $exit_code -eq 0 ] || [ $exit_code -eq 2 ]"]
+    interval     = "5s"
+    timeout      = "3s"
+    start_period = "10s"
+    retries      = 3
+  }
 }
 
-# Capture container logs immediately after creation
+# Capture container logs after creation
 resource "null_resource" "capture_logs" {
   count = var.container_count
 

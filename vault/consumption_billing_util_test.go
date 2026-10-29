@@ -27,8 +27,8 @@ import (
 	"github.com/hashicorp/vault/builtin/logical/ssh"
 	"github.com/hashicorp/vault/builtin/logical/totp"
 	"github.com/hashicorp/vault/builtin/logical/transit"
-	"github.com/hashicorp/vault/helper/namespace"
 	"github.com/hashicorp/vault/helper/pluginconsts"
+	"github.com/hashicorp/vault/internalshared/namespace"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/hashicorp/vault/vault/billing"
 	"github.com/stretchr/testify/require"
@@ -128,8 +128,10 @@ func TestStoreAndGetMaxRoleCounts(t *testing.T) {
 			require.Equal(t, tc.roleCounts.GCPImpersonatedAccounts, retrievedCounts.GCPImpersonatedAccounts)
 			require.Equal(t, tc.roleCounts.OpenLDAPDynamicRoles, retrievedCounts.OpenLDAPDynamicRoles)
 			require.Equal(t, tc.roleCounts.OpenLDAPStaticRoles, retrievedCounts.OpenLDAPStaticRoles)
+			require.Equal(t, tc.roleCounts.OpenLDAPLibrarySets, retrievedCounts.OpenLDAPLibrarySets)
 			require.Equal(t, tc.roleCounts.LDAPDynamicRoles, retrievedCounts.LDAPDynamicRoles)
 			require.Equal(t, tc.roleCounts.LDAPStaticRoles, retrievedCounts.LDAPStaticRoles)
+			require.Equal(t, tc.roleCounts.LDAPLibrarySets, retrievedCounts.LDAPLibrarySets)
 			require.Equal(t, tc.roleCounts.DatabaseDynamicRoles, retrievedCounts.DatabaseDynamicRoles)
 			require.Equal(t, tc.roleCounts.DatabaseStaticRoles, retrievedCounts.DatabaseStaticRoles)
 			require.Equal(t, tc.roleCounts.GCPRolesets, retrievedCounts.GCPRolesets)
@@ -222,6 +224,11 @@ func TestHWMRoleCounts(t *testing.T) {
 			key:          "static-role/",
 			numberOfKeys: 5,
 		},
+		"LDAP Library Sets": {
+			mount:        pluginconsts.SecretEngineLDAP,
+			key:          "library/",
+			numberOfKeys: 5,
+		},
 		"OpenLDAP Dynamic Roles": {
 			mount:        pluginconsts.SecretEngineOpenLDAP,
 			key:          "role/",
@@ -230,6 +237,11 @@ func TestHWMRoleCounts(t *testing.T) {
 		"OpenLDAP Static Roles": {
 			mount:        pluginconsts.SecretEngineOpenLDAP,
 			key:          "static-role/",
+			numberOfKeys: 5,
+		},
+		"OpenLDAP Library Sets": {
+			mount:        pluginconsts.SecretEngineOpenLDAP,
+			key:          "library/",
 			numberOfKeys: 5,
 		},
 		"Alicloud Dynamic Roles": {
@@ -281,7 +293,8 @@ func TestHWMRoleCounts(t *testing.T) {
 	firstCounts := core.GetRoleCounts()
 	verifyExpectedRoleCounts(t, firstCounts, 5)
 
-	counts, _, err := core.UpdateMaxRoleAndManagedKeyCounts(context.Background(), billing.ReplicatedPrefix, time.Now())
+	roles, keys, roleAttribution, keyAttribution := core.GetRoleAndManagedKeyCountsAndAttribution(billing.ReplicatedPrefix)
+	counts, _, err := core.UpdateMaxRoleAndManagedKeyCounts(context.Background(), billing.ReplicatedPrefix, time.Now(), roles, keys, roleAttribution, keyAttribution)
 	require.NoError(t, err)
 
 	verifyExpectedRoleCounts(t, counts, 5)
@@ -297,7 +310,8 @@ func TestHWMRoleCounts(t *testing.T) {
 		addRoleToStorage(t, core, tc.mount, tc.key, 2)
 	}
 
-	counts, _, err = core.UpdateMaxRoleAndManagedKeyCounts(context.Background(), billing.ReplicatedPrefix, time.Now())
+	roles, keys, roleAttribution, keyAttribution = core.GetRoleAndManagedKeyCountsAndAttribution(billing.ReplicatedPrefix)
+	counts, _, err = core.UpdateMaxRoleAndManagedKeyCounts(context.Background(), billing.ReplicatedPrefix, time.Now(), roles, keys, roleAttribution, keyAttribution)
 	require.NoError(t, err)
 
 	verifyExpectedRoleCounts(t, counts, 5)
@@ -313,7 +327,8 @@ func TestHWMRoleCounts(t *testing.T) {
 		addRoleToStorage(t, core, tc.mount, tc.key, 8)
 	}
 
-	counts, _, err = core.UpdateMaxRoleAndManagedKeyCounts(context.Background(), billing.ReplicatedPrefix, time.Now())
+	roles, keys, roleAttribution, keyAttribution = core.GetRoleAndManagedKeyCountsAndAttribution(billing.ReplicatedPrefix)
+	counts, _, err = core.UpdateMaxRoleAndManagedKeyCounts(context.Background(), billing.ReplicatedPrefix, time.Now(), roles, keys, roleAttribution, keyAttribution)
 	require.NoError(t, err)
 
 	verifyExpectedRoleCounts(t, counts, 8)
@@ -329,7 +344,8 @@ func TestHWMRoleCounts(t *testing.T) {
 		addRoleToStorage(t, core, tc.mount, tc.key, 5)
 	}
 
-	counts, _, err = core.UpdateMaxRoleAndManagedKeyCounts(context.Background(), billing.ReplicatedPrefix, time.Now())
+	roles, keys, roleAttribution, keyAttribution = core.GetRoleAndManagedKeyCountsAndAttribution(billing.ReplicatedPrefix)
+	counts, _, err = core.UpdateMaxRoleAndManagedKeyCounts(context.Background(), billing.ReplicatedPrefix, time.Now(), roles, keys, roleAttribution, keyAttribution)
 	require.NoError(t, err)
 
 	verifyExpectedRoleCounts(t, counts, 8)
@@ -1200,6 +1216,13 @@ func deleteTotpKeyFromStorage(t *testing.T, ctx context.Context, core *Core, mou
 	require.NoError(t, err)
 }
 
+func addTransitKeyToStorage(t *testing.T, ctx context.Context, core *Core, mount string, token string, keyName string) {
+	req := logical.TestRequest(t, logical.CreateOperation, fmt.Sprintf("%v/keys/%s", mount, keyName))
+	req.ClientToken = token
+	_, err := core.HandleRequest(ctx, req)
+	require.NoError(t, err)
+}
+
 // TestGetStoredOidcDurationAdjustedCount tests reading OIDC duration-adjusted token counts from storage
 func TestGetStoredOidcDurationAdjustedCount(t *testing.T) {
 	tests := []struct {
@@ -1440,12 +1463,12 @@ func TestIncrementOidcTokenCount(t *testing.T) {
 
 			// Apply increments sequentially
 			for _, duration := range tt.durations {
-				core.IncrementOidcTokenCount(duration)
+				core.IncrementOidcTokenCount(duration, logical.MountAttribution{})
 			}
 
 			// Verify in-memory counters
 			core.consumptionBillingLock.RLock()
-			actualTotalDuration := core.consumptionBilling.IdentityTokenUnits.OidcTokenUnits.Load()
+			actualTotalDuration := core.consumptionBilling.SecretEngineCounts.Oidc.MonthlyUnits.Load()
 			core.consumptionBillingLock.RUnlock()
 			require.InDelta(t, tt.expectedInMemNormalizedUnits, actualTotalDuration, 1e-9)
 		})
@@ -1586,7 +1609,12 @@ func TestGcpKmsDataProtectionCallCounts(t *testing.T) {
 	// Simulate GCP KMS plugin writing billing data (this is what the plugin does when operations occur)
 	// In a real scenario, this would be triggered by actual encrypt/decrypt/sign/verify operations
 	err := core.consumptionBilling.WriteBillingData(ctx, "gcpkms", map[string]interface{}{
-		"count": uint64(1),
+		"count":               uint64(1),
+		"mountPath":           "gcpkms/",
+		"mountAccessor":       "gcpkms_accessor",
+		"mountType":           "gcpkms",
+		"backendAwareUUID":    "gcpkms-backend-aware-uuid",
+		"mountRunningVersion": "v1.0.0",
 	})
 	require.NoError(t, err)
 
@@ -1604,11 +1632,21 @@ func TestGcpKmsDataProtectionCallCounts(t *testing.T) {
 
 	// Simulate more operations
 	err = core.consumptionBilling.WriteBillingData(ctx, "gcpkms", map[string]interface{}{
-		"count": uint64(1),
+		"count":               uint64(1),
+		"mountPath":           "gcpkms/",
+		"mountAccessor":       "gcpkms_accessor",
+		"mountType":           "gcpkms",
+		"backendAwareUUID":    "gcpkms-backend-aware-uuid",
+		"mountRunningVersion": "v1.0.0",
 	})
 	require.NoError(t, err)
 	err = core.consumptionBilling.WriteBillingData(ctx, "gcpkms", map[string]interface{}{
-		"count": uint64(1),
+		"count":               uint64(1),
+		"mountPath":           "gcpkms/",
+		"mountAccessor":       "gcpkms_accessor",
+		"mountType":           "gcpkms",
+		"backendAwareUUID":    "gcpkms-backend-aware-uuid",
+		"mountRunningVersion": "v1.0.0",
 	})
 	require.NoError(t, err)
 
@@ -1674,4 +1712,30 @@ func TestCore_BillingRetentionMonths(t *testing.T) {
 	retentionMonths, err = core.GetBillingRetentionMonths(ctx)
 	require.NoError(t, err)
 	require.Equal(t, newRetention, retentionMonths)
+}
+
+// assertMountAttribution verifies that a MountAttribution has the expected field values.
+// Count is compared with a small epsilon (1e-9) to handle 1-ULP floating-point rounding
+// differences that arise when counts are accumulated via toFloat64 function calls. The
+// Count field may be a json.Number after a storage round-trip, so it is parsed via its
+// string representation before comparison.
+func assertMountAttribution(t *testing.T, actual logical.MountAttribution, expected logical.MountAttribution) {
+	t.Helper()
+	require.Equal(t, expected.MountAccessor, actual.MountAccessor, "MountAccessor mismatch")
+	require.Equal(t, expected.MountPath, actual.MountPath, "MountPath mismatch for %s", expected.MountAccessor)
+	require.Equal(t, expected.MountType, actual.MountType, "MountType mismatch for %s", expected.MountAccessor)
+	require.Equal(t, expected.NamespaceID, actual.NamespaceID, "NamespaceID mismatch for %s", expected.MountAccessor)
+	require.Equal(t, expected.NamespacePath, actual.NamespacePath, "NamespacePath mismatch for %s", expected.MountAccessor)
+	require.Equal(t, expected.ParentNamespaceID, actual.ParentNamespaceID, "ParentNamespaceID mismatch for %s", expected.MountAccessor)
+	require.Equal(t, expected.BackendAwareUUID, actual.BackendAwareUUID, "BackendAwareUUID mismatch for %s", expected.MountAccessor)
+	require.Equal(t, expected.MountRunningVersion, actual.MountRunningVersion, "MountRunningVersion mismatch for %s", expected.MountAccessor)
+	var actualCount, expectedCount float64
+	if _, err := fmt.Sscanf(fmt.Sprintf("%v", actual.Count), "%g", &actualCount); err != nil {
+		t.Fatalf("failed to parse actual count %v: %v", actual.Count, err)
+	}
+	if _, err := fmt.Sscanf(fmt.Sprintf("%v", expected.Count), "%g", &expectedCount); err != nil {
+		t.Fatalf("failed to parse expected count %v: %v", expected.Count, err)
+	}
+	require.InDelta(t, expectedCount, actualCount, 1e-9, "Count mismatch for %s", expected.MountAccessor)
+	require.Equal(t, expected.IsExternal, actual.IsExternal)
 }

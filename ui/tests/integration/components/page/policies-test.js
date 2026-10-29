@@ -23,8 +23,10 @@ const policiesMockModel = [
     name: 'default',
     policy: undefined,
     policyType: 'acl',
-    canEdit: true,
-    canRead: true,
+    capabilities: {
+      canEdit: true,
+      canRead: true,
+    },
   },
   {
     id: 'root',
@@ -50,8 +52,10 @@ const customPoliciesMockModel = [
     name: 'default',
     policy: undefined,
     policyType: 'acl',
-    canEdit: true,
-    canRead: true,
+    capabilities: {
+      canEdit: true,
+      canRead: true,
+    },
   },
   {
     id: 'root',
@@ -64,9 +68,11 @@ const customPoliciesMockModel = [
     name: 'custom',
     policy: undefined,
     policyType: 'acl',
-    canDelete: true,
-    canEdit: true,
-    canRead: true,
+    capabilities: {
+      canEdit: true,
+      canRead: true,
+      canDelete: true,
+    },
   },
 ];
 customPoliciesMockModel.meta = {

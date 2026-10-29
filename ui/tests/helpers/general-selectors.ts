@@ -38,6 +38,7 @@ export const GENERAL = {
   copyButton: '[data-test-copy-button]',
   revealButton: (label: string) => `[data-test-reveal="${label}"] button`, // intended for Hds::Reveal components
   accordionButton: (label: string) => `[data-test-accordion="${label}"] button`, // intended for Hds::Accordion components
+  accordionContent: (label: string) => `[data-test-accordion="${label}"] .hds-accordion-item__content`,
   // there should only be one submit button per view (e.g. one per form) so this does not need to be dynamic
   // this button should be used for any kind of "submit" on a form or "save" action.
   submitButton: '[data-test-submit]',
@@ -54,7 +55,9 @@ export const GENERAL = {
 
   /* ────── Tables ────── */
   table: (title: string) => `[data-test-table="${title}"]`,
-  tableRow: (idx?: number) => (idx ? `[data-test-table-row="${idx}"]` : '[data-test-table-row]'),
+  tableRow: (idx?: number) =>
+    idx !== undefined ? `[data-test-table-row="${idx}"]` : '[data-test-table-row]',
+  tableParentRow: '[data-test-table-parent-row]',
   tableData: (idx?: number, key?: string) => `[data-test-table-row="${idx}"] [data-test-table-data="${key}"]`,
   tableDataNested: (idx: number, key: string) =>
     `[role="row"]:nth-of-type(${idx + 1}) [data-test-table-data="${key}"]`,
@@ -92,6 +95,7 @@ export const GENERAL = {
   inputGroupByAttr: (attr: string) => `[data-test-input-group="${attr}"]`,
   inputSearch: (attr: string) => `[data-test-input-search="${attr}"]`,
   labelById: (id: string) => `label[id="${id}"]`,
+  labelFor: (name: string) => `label[for="${name}"]`,
   labelByGroupControlIndex: (index: number) => `.hds-form-group__control-field:nth-of-type(${index}) label`,
   maskedInput: '[data-test-masked-input]',
   radioByAttr: (attr: string) => (attr ? `[data-test-radio="${attr}"]` : '[data-test-radio]'),
@@ -116,9 +120,11 @@ export const GENERAL = {
     addRow: '[data-test-kv-add-row]',
     deleteRow: (idx = 0) => `[data-test-kv-delete-row="${idx}"]`,
   },
-  kvSuggestion: {
-    input: '[data-test-kv-suggestion-input]',
-    select: '[data-test-kv-suggestion-select]',
+  // the FormField "keyValueInputs" editType (Hds::Form::KeyValueInputs), distinct from kvObjectEditor above
+  kvFieldByAttr: (attr: string, idx = 0) => `[data-test-kv-field="${attr}-${idx}"]`,
+  suggestion: {
+    input: (type: string) => `[data-test-suggestion-input="${type}"]`,
+    select: (type: string) => `[data-test-suggestion-select="${type}"]`,
   },
 
   /* ────── Search Select ────── */
@@ -159,6 +165,7 @@ export const GENERAL = {
   messageDescription: '[data-test-message-error-description]',
   validationErrorByAttr: (attr: string) => `[data-test-validation-error="${attr}"]`,
   validationWarningByAttr: (attr: string) => `[data-test-validation-warning="${attr}"]`,
+  invalidFormMessage: '[data-test-invalid-form-message]',
 
   pageError: {
     error: '[data-test-page-error]',
@@ -205,7 +212,7 @@ export const GENERAL = {
   licenseBanner: (name: string) => `[data-test-license-banner="${name}"]`,
   tooltip: (label: string) => `[data-test-tooltip="${label}"]`,
   tooltipText: '.hds-tooltip-container',
-  textDisplay: (attr: string) => `[data-test-text-display="${attr}"]`,
+  textDisplay: (attr?: string) => (attr ? `[data-test-text-display="${attr}"]` : '[data-test-text-display]'),
   textBody: (attr: string) => `[data-test-text-body="${attr}"]`,
   widget: (name: string) => `[data-test-widget="${name}"]`,
 };

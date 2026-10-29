@@ -237,8 +237,6 @@ func TestSignRevocationList(t *testing.T) {
 	cluster := vault.NewTestCluster(t, coreConfig, &vault.TestClusterOptions{
 		HandlerFunc: vaulthttp.Handler,
 	})
-	cluster.Start()
-	defer cluster.Cleanup()
 	client := cluster.Cores[0].Client
 
 	// Mount PKI, use this form of backend so our request is closer to reality (json parsed)

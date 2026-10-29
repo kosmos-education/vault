@@ -1,4 +1,4 @@
-// Copyright IBM Corp. 2016, 2025
+// Copyright IBM Corp. 2016, 2026
 // SPDX-License-Identifier: BUSL-1.1
 
 package github
@@ -520,7 +520,7 @@ func (r *CreateBackportRes) CommentBody() string {
 		return "no backport response has been initialized"
 	}
 
-	t := r.ToTable()
+	t := escapeMarkdownTableColumns(r.ToTable(), 1, 2, 3, 4, 5)
 	err := r.Err()
 	if err == nil {
 		t.SetTitle("Backport workflow completed!")

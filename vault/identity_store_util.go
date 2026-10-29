@@ -10,23 +10,22 @@ import (
 	"maps"
 	"math/rand"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	metrics "github.com/armon/go-metrics"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/hashicorp/errwrap"
 	memdb "github.com/hashicorp/go-memdb"
+	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/hashicorp/go-secure-stdlib/strutil"
 	uuid "github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault/helper/activationflags"
 	"github.com/hashicorp/vault/helper/identity"
 	"github.com/hashicorp/vault/helper/identity/mfa"
-	"github.com/hashicorp/vault/helper/namespace"
 	"github.com/hashicorp/vault/helper/storagepacker"
+	"github.com/hashicorp/vault/internalshared/namespace"
 	"github.com/hashicorp/vault/sdk/helper/consts"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/hashicorp/vault/vault/observations"
@@ -110,6 +109,14 @@ func (i *IdentityStore) loadArtifacts(ctx context.Context, isActive bool) error 
 
 		i.startSCIMDeletingClientCleanup(ctx, isActive)
 
+		if err := i.loadTPMs(ctx); err != nil {
+			return fmt.Errorf("failed to load TPMs: %w", err)
+		}
+
+		if err := i.loadTPMGroups(ctx); err != nil {
+			return fmt.Errorf("failed to load TPMGroups: %w", err)
+		}
+
 		return nil
 	}
 
@@ -125,15 +132,6 @@ func (i *IdentityStore) loadArtifacts(ctx context.Context, isActive bool) error 
 	// suffix. N.B. *entity alias* duplicates will still be merged as before.
 	if i.activationManager.IsActivationFlagEnabled(activationflags.IdentityDeduplication) {
 		i.conflictResolver = &renameResolver{i.logger}
-	}
-
-	// Restore the in-memory scimEnabled flag from the persisted activation
-	// flags. The ActivationFunc callback only fires on API writes and storage
-	// invalidations, not on startup, so we must explicitly check the flag here
-	// to ensure SCIM paths remain available after seal/unseal.
-	if i.activationManager.IsActivationFlagEnabled(activationflags.SCIMEnablement) {
-		i.logger.Info("restoring SCIM enablement from persisted activation flags")
-		i.scimEnabled = true
 	}
 
 	// Load everything when MemDB is set to operate on lower cased names.
@@ -187,9 +185,6 @@ func (i *IdentityStore) activate(ctx context.Context, _ *logical.Request, featur
 	switch featureName {
 	case activationflags.IdentityDeduplication:
 		return i.activateDeduplication()
-	case activationflags.SCIMEnablement:
-		i.logger.Info("activating SCIM paths; SCIM operations can now be performed")
-		i.scimEnabled = true
 	}
 
 	return nil
@@ -234,7 +229,7 @@ func (i *IdentityStore) activateDeduplication() error {
 		// If we fail to load from storage, we'll end up with a broken
 		// IdentityStore, so we're better of just sealing and letting another node
 		// take over!
-		if err := i.loadArtifacts(reloadCtx, i.localNode.HAState() == consts.Active); err != nil {
+		if err := i.loadArtifacts(reloadCtx, i.localNode.HAStateWithLock() == consts.Active); err != nil {
 			i.logger.Error("failed to activate identity deduplication, shutting down")
 			i.activationErrorHandler.Shutdown()
 			return
@@ -669,7 +664,8 @@ LOOP:
 					// operator via delete or merge.
 					integrityCheck, err := checkEntityIntegrity(entity)
 					if err != nil {
-						i.logger.Warn("identity entity integrity check failed; attempting to repair",
+						i.logger.Warn(
+							"identity entity integrity check failed; attempting to repair",
 							"entity_id", entity.ID,
 							"has_nil_aliases", integrityCheck.hasNilAliases,
 							"dangling_aliases", integrityCheck.danglingAliases,
@@ -685,7 +681,8 @@ LOOP:
 						}
 
 						if !(i.localNode.ReplicationState().HasState(consts.ReplicationPerformanceSecondary) || i.localNode.HAState() == consts.PerfStandby) {
-							i.logger.Warn("persisting repaired identity entity",
+							i.logger.Warn(
+								"persisting repaired identity entity",
 								"name", entity.Name,
 								"id", entity.ID,
 								"namespace_id", entity.NamespaceID,
@@ -979,7 +976,8 @@ func (i *IdentityStore) upsertEntityInTxn(ctx context.Context, txn *memdb.Txn, e
 			// ConflictResolver implementation, the behavior here is a bit nuanced.
 			// Rather than introduce a behavior change, we handle this case directly
 			// as before by merging.
-			i.logger.Warn("alias is already tied to a different entity; these entities are being merged",
+			i.logger.Warn(
+				"alias is already tied to a different entity; these entities are being merged",
 				"alias_id", alias.ID,
 				"other_entity_id", aliasByFactors.CanonicalID,
 				"entity_aliases", entity.Aliases,
@@ -1100,13 +1098,24 @@ func (i *IdentityStore) processLocalAlias(ctx context.Context, lAlias *logical.A
 		}
 	}
 
-	mountValidationResp := i.router.ValidateMountByAccessor(lAlias.MountAccessor)
-	if mountValidationResp == nil {
-		return nil, fmt.Errorf("invalid mount accessor %q", lAlias.MountAccessor)
+	var mountValidationResp *ValidateMountResponse
+	var isSyntheticLocal bool
+	if i.syntheticAliasAccessorValidator != nil {
+		valid, isLocal, err := i.syntheticAliasAccessorValidator.validateSyntheticAliasAccessor(ctx, lAlias.MountAccessor)
+		if err == nil && valid && isLocal {
+			isSyntheticLocal = true
+		}
 	}
 
-	if !mountValidationResp.MountLocal {
-		return nil, fmt.Errorf("mount accessor %q is not local", lAlias.MountAccessor)
+	if !isSyntheticLocal {
+		mountValidationResp = i.router.ValidateMountByAccessor(lAlias.MountAccessor)
+		if mountValidationResp == nil {
+			return nil, fmt.Errorf("invalid mount accessor %q", lAlias.MountAccessor)
+		}
+
+		if !mountValidationResp.MountLocal {
+			return nil, fmt.Errorf("mount accessor %q is not local", lAlias.MountAccessor)
+		}
 	}
 
 	alias, err := i.MemDBAliasByFactors(lAlias.MountAccessor, lAlias.Name, true, false)
@@ -1153,8 +1162,10 @@ func (i *IdentityStore) processLocalAlias(ctx context.Context, lAlias *logical.A
 	alias.Name = lAlias.Name
 	alias.MountAccessor = lAlias.MountAccessor
 	alias.Metadata = lAlias.Metadata
-	alias.MountPath = mountValidationResp.MountPath
-	alias.MountType = mountValidationResp.MountType
+	if mountValidationResp != nil {
+		alias.MountPath = mountValidationResp.MountPath
+		alias.MountType = mountValidationResp.MountType
+	}
 	alias.Local = lAlias.Local
 	alias.CustomMetadata = lAlias.CustomMetadata
 	alias.Issuer = lAlias.Issuer
@@ -1969,97 +1980,16 @@ func (i *IdentityStore) MemDBDeleteEntityByID(entityID string) error {
 	return nil
 }
 
-func (i *IdentityStore) MemDBEntitiesByScimClientID(ctx context.Context, scimClientID string, maxResultSet int) ([]*identity.Entity, error) {
-	if scimClientID == "" {
-		return nil, nil
-	}
-
-	txn := i.db.Txn(false)
-	defer txn.Abort()
-
-	entities, err := i.MemDBEntitiesByScimClientIDInTxn(ctx, txn, scimClientID, maxResultSet)
-	if err != nil {
-		return nil, err
-	}
-
-	return entities, nil
-}
-
 // MemDBEntitiesByScimClientIDInTxn retrieves a fully sorted list of all entities
 // belonging to a specific SCIM client.
 //
-// Implementation Pattern: Filter-Then-Sort
-// This function implements the "filter then sort" pattern, which is the idiomatic
-// approach for this type of query in go-memdb. The process involves two steps:
-//  1. Filtering: A simple two-part compound index on `(NamespaceID, ScimClientID)`
-//     is used with `txn.Get()` to efficiently retrieve all entities for the client.
-//  2. Sorting: The resulting slice of entities is then sorted in-memory by name
-//     using Go's native `sort.Slice`.
+// The three-part CompoundIndex on (NamespaceID, ScimClientID, Name) is queried
+// via a prefix lookup on (NamespaceID, ScimClientID), which causes go-memdb to
+// return results already sorted by Name. This avoids the need for an extra
+// in-memory sort step.
 //
-// Why This Pattern is Used (memdb Limitations):
-// It might seem more efficient to perform the sorting at the database level
-// using a single ordered index, memdb's built-in `CompoundIndex` does not support
-// using a partial key (e.g., just `NamespaceID` and `ScimClientID`) to get an
-// ordered iterator over the remaining fields (e.g., `Name`). The indexer's
-// internal `FromArgs` method requires a value for every field defined in the index.
-// This makes a single-operation "filter and ordered scan" impossible with the
-// standard indexers.
-//
-// Given that go-memdb is an in-memory database, sorting a pre-filtered slice
-// is extremely fast and avoids the complexity of creating a custom indexer.
 // This function returns the entire sorted list; the caller is responsible for
 // any subsequent pagination.
-func (i *IdentityStore) MemDBEntitiesByScimClientIDInTxn(ctx context.Context, txn *memdb.Txn, scimClientID string, maxResultSet int) ([]*identity.Entity, error) {
-	if txn == nil {
-		return nil, fmt.Errorf("nil txn")
-	}
-
-	if scimClientID == "" {
-		return nil, fmt.Errorf("empty scim client id key")
-	}
-
-	ns, err := namespace.FromContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	ws := memdb.NewWatchSet()
-
-	entitiesIter, err := txn.Get(entitiesTable, "scim_client_id", ns.ID, scimClientID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to lookup entities using scim client id: %w", err)
-	}
-
-	ws.Add(entitiesIter.WatchCh())
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-			break
-		}
-
-		var entities []*identity.Entity
-		for item := entitiesIter.Next(); item != nil; item = entitiesIter.Next() {
-			if len(entities) > maxResultSet {
-				return nil, fmt.Errorf("query returned more than the server's limit of %d results. Please use more specific filters", maxResultSet)
-			}
-
-			entity, err := item.(*identity.Entity).Clone()
-			if err != nil {
-				return nil, err
-			}
-			entities = append(entities, entity)
-		}
-
-		sort.Slice(entities, func(i, j int) bool {
-			return entities[i].Name < entities[j].Name
-		})
-
-		return entities, nil
-	}
-}
 
 // FetchEntityForLocalAliasInTxn fetches the entity associated with the provided
 // local identity.Alias. MemDB will first be searched for the entity. If it is
@@ -3184,6 +3114,9 @@ func (i *IdentityStore) refreshExternalGroupMembershipsByEntityID(ctx context.Co
 
 		var newGroups []*identity.Group
 		var validAliases []*logical.Alias
+
+		// seenGroupIDs prevents duplicate group objects when a JWT/OIDC token carries repeated group-name entries.
+		seenGroupIDs := make(map[string]struct{})
 		for _, alias := range groupAliases {
 			aliasByFactors, err := i.MemDBAliasByFactorsInTxn(txn, alias.MountAccessor, alias.Name, true, true)
 			if err != nil {
@@ -3200,6 +3133,10 @@ func (i *IdentityStore) refreshExternalGroupMembershipsByEntityID(ctx context.Co
 				return false, nil, fmt.Errorf("group unavailable for a valid alias ID %q", aliasByFactors.ID)
 			}
 
+			if _, alreadySeen := seenGroupIDs[mappingGroup.ID]; alreadySeen {
+				continue
+			}
+			seenGroupIDs[mappingGroup.ID] = struct{}{}
 			newGroups = append(newGroups, mappingGroup)
 			validAliases = append(validAliases, alias)
 		}
@@ -3220,7 +3157,11 @@ func (i *IdentityStore) refreshExternalGroupMembershipsByEntityID(ctx context.Co
 
 			i.logger.Debug("adding member entity ID to external group", "member_entity_id", entityID, "group_id", group.ID)
 
-			group.MemberEntityIDs = append(group.MemberEntityIDs, entityID)
+			// Guard against duplicates even if newGroups was somehow not
+			// deduplicated upstream (e.g. concurrent writes on a standby).
+			if !strutil.StrListContains(group.MemberEntityIDs, entityID) {
+				group.MemberEntityIDs = append(group.MemberEntityIDs, entityID)
+			}
 
 			err = i.UpsertGroupInTxn(ctx, txn, group, true)
 			if errors.Is(err, logical.ErrReadOnly) {
@@ -3594,7 +3535,7 @@ func (i *IdentityStore) MakeDeduplicationDoneChan() {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 
-	i.activateDeduplicationDone = make(chan struct{})
+	i.activateDeduplicationDone = make(chan struct{}, 1)
 }
 
 // WaitForActivateDeduplicationDone is a test helper to wait for the identity

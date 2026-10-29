@@ -24,9 +24,9 @@ import (
 	"github.com/golang/protobuf/proto"
 	log "github.com/hashicorp/go-hclog"
 	lru "github.com/hashicorp/golang-lru"
-	"github.com/hashicorp/vault/helper/metricsutil"
-	"github.com/hashicorp/vault/helper/namespace"
-	"github.com/hashicorp/vault/helper/timeutil"
+	"github.com/hashicorp/vault/internalshared/metricsutil"
+	"github.com/hashicorp/vault/internalshared/namespace"
+	"github.com/hashicorp/vault/internalshared/timeutil"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/hashicorp/vault/vault/activity"
 	"github.com/mitchellh/mapstructure"
@@ -1946,7 +1946,7 @@ func (c *Core) ActivityLogInjectResponse(ctx context.Context, pq *activity.Preco
 func (a *ActivityLog) includeInResponse(query *namespace.Namespace, record *namespace.Namespace) bool {
 	if record == nil {
 		// Deleted namespace, only include in root or admin namespace (if configured) queries
-		adminNsPath := namespace.Canonicalize(a.core.administrativeNamespacePath())
+		adminNsPath := namespace.Canonicalize(a.core.AdministrativeNamespacePath())
 		return query.ID == namespace.RootNamespaceID || (adminNsPath != "" && query.Path == adminNsPath)
 	}
 	return record.HasParent(query)
@@ -2142,11 +2142,6 @@ func (a *ActivityLog) HandleUsage(ctx context.Context, entry *logical.TokenEntry
 
 	// Do not count root tokens in client count.
 	if entry.IsRoot() {
-		return nil
-	}
-
-	// Tokens created for the purpose of Link should bypass counting for billing purposes
-	if entry.InternalMeta != nil && entry.InternalMeta[IgnoreForBilling] == "true" {
 		return nil
 	}
 
